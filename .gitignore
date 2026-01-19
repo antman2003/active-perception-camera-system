@@ -1,6 +1,6 @@
-Implementation_plan.md #intentionally ignored because it's a plan
-
-.cursorrules #intentionally ignored because it's a rules file
+# Intentionally ignored files
+Implementation_plan.md
+.cursorrules
 
 # Python
 __pycache__/
