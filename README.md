@@ -3,7 +3,7 @@
 A camera-based **active perception system** that dynamically adjusts its sensing viewpoint based on perception uncertainty, closing the loop between sensing, decision-making, and physical action.
 
 ---
-
+Activate the venv (.\venv\Scripts\Activate.ps1).
 ## Overview
 
 Traditional computer vision systems operate on static, single-frame inputs.In contrast, **active perception** treats sensing as a decision-making process:  when perception confidence is low, the system actively changes *how* it senses the environment.
