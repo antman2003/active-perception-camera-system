@@ -77,7 +77,7 @@ class PerceptionSystem:
         # 1. Draw Total Count at Top-Left
         total_count = len(ids)
         cv2.putText(annotated_frame, f"Total Markers: {total_count}", (10, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
         
         # 2. Draw each marker
         for i, corner_set in enumerate(corners):
