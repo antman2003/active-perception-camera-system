@@ -11,6 +11,7 @@ Traditional computer vision systems operate on static, single-frame inputs.In co
 This project implements a **hardware-in-the-loop active perception pipeline** using a movable pan-tilt camera. The system continuously evaluates visual confidence and adapts its camera viewpoint to improve perception robustness under challenging real-world conditions such as:
 
 - Low illumination  
+- Small target size
 - Motion blur  
 - Limited depth of field  
 - Suboptimal viewing angles  

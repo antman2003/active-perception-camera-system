@@ -35,25 +35,33 @@ class ActivePerceptionLoop:
         self.policy = ActionPolicy(self.camera)
         
         # 4. System State
-        self.state = "MONITOR"  # options: MONITOR, EXPLORE
-        self.current_exposure_idx = 2  # Start middle-ish index
+        self.state = "MONITOR"  # options: MONITOR, EXPLORE, EXPLORE_ZOOM
+        self.current_exposure_idx = 3  # Start middle-ish index
+        self.current_zoom_idx = 0  # Start with 1.0x
         
         # Exploration variables
         self.exploration_results = {} # {exposure_idx: average_uncertainty}
         self.explore_step = 0
         self.best_exposure_idx = 0
+        self.zoom_exploration_results = {} # {zoom_idx: average_uncertainty}
+        self.zoom_step = 0
         
         # Environmental Context
         self.baseline_brightness = None # To detect lighting changes
-        self.brightness_change_ratio = 0.10 # 20% change triggers re-exploration
+        self.brightness_change_ratio = 0.10 # 10% change triggers re-exploration
         self.frame_count = 0
         self.ignore_until_frame = 0 # Stabilization window
+        self.zoom_ignore_until_frame = 0
+        self.baseline_size = None
+        self.size_change_ratio = 0.35
+        self.size_change_floor = 200.0
+        self.zoom_initialized = False
         
         # Initialize camera to default
         if self.policy.exposure_supported:
             self.policy.execute_exposure(self.current_exposure_idx)
 
-    def run(self):
+    def run(self):#This is the main loop of the system
         print("\n=== Active Perception Loop Started ===")
         print("Press 'q' in the window to quit.")
         
@@ -66,6 +74,7 @@ class ActivePerceptionLoop:
                 if not ret: break
                 
                 # --- Step 2: Perceive ---
+                frame = self.policy.apply_digital_zoom(frame)
                 detected, ids, corners = self.perception.detect(frame)
                 
                 # --- Step 3: Evaluate (Brain) ---
@@ -74,7 +83,8 @@ class ActivePerceptionLoop:
                 
                 # --- Step 4: Act (Decision Making) ---
                 current_brightness = np.mean(frame)
-                self._update_state_machine(smooth_u, current_brightness)
+                size_value = metrics.get("size_raw", 0.0)
+                self._update_state_machine(smooth_u, current_brightness, size_value, detected)
                 
                 # --- Step 5: Visualize ---
                 vis_frame = self._draw_hud(frame, smooth_u, metrics, corners, ids)
@@ -87,7 +97,7 @@ class ActivePerceptionLoop:
             self.camera.release()
             print("System Shutdown.")
 
-    def _update_state_machine(self, uncertainty, current_brightness):
+    def _update_state_machine(self, uncertainty, current_brightness, size_value, detected):
         """
         Core Logic: Decides whether to stay monitoring or start exploring.
         """
@@ -126,6 +136,30 @@ class ActivePerceptionLoop:
                     self.explore_step = 0
                     self.exploration_results = {}
                     self.baseline_brightness = None # Reset baseline
+                    return
+            
+            # --- Zoom exploration trigger (start or size change) ---
+            if self.frame_count < self.zoom_ignore_until_frame:
+                return
+                
+            if self.baseline_size is None and detected:
+                self.baseline_size = size_value
+                print(f"[i] Baseline Size Set: {self.baseline_size:.1f}")
+            
+            size_changed = False
+            if self.baseline_size is not None and detected:
+                size_diff = abs(size_value - self.baseline_size)
+                size_threshold = max(self.baseline_size * self.size_change_ratio, self.size_change_floor)
+                if size_diff > size_threshold:
+                    size_changed = True
+                    print(f"[!] Size Changed! Diff: {size_diff:.1f} baseline: {self.baseline_size:.1f} (Thresh: {size_threshold:.1f})")
+            
+            if (not self.zoom_initialized) or size_changed:
+                print(f"[!] Triggering ZOOM EXPLORE (Score: {uncertainty:.2f})")
+                self.state = "EXPLORE_ZOOM"
+                self.zoom_step = 0
+                self.zoom_exploration_results = {}
+                self.baseline_size = None
                 
         elif self.state == "EXPLORE":
             # In explore mode, we try one exposure per few frames
@@ -150,6 +184,39 @@ class ActivePerceptionLoop:
                 self.policy.execute_exposure(self.explore_step)
                 # Small sleep to let hardware settle
                 time.sleep(0.1)
+        
+        elif self.state == "EXPLORE_ZOOM":
+            # 1. Record score for current zoom setting
+            current_idx = self.zoom_step
+            self.zoom_exploration_results[current_idx] = uncertainty
+            print(f"   -> Testing Zoom Level {current_idx}: Score {uncertainty:.2f}")
+            
+            # 2. Move to next step
+            self.zoom_step += 1
+            
+            # 3. Check if done
+            if self.zoom_step >= len(self.policy.zoom_levels):
+                # Finished sweeping! Pick winner.
+                self._apply_best_zoom()
+                # After zoom is chosen, force an exposure adjustment sweep.
+                # Rationale: zoom changes effective image content; re-tuning exposure can
+                # improve detection robustness even if lighting didn't "change".
+                if self.policy.exposure_supported:
+                    print("[!] Triggering EXPLORE (Exposure) after ZOOM selection")
+                    self.state = "EXPLORE"
+                    self.explore_step = 0
+                    self.exploration_results = {}
+                    self.baseline_brightness = None
+                    # Start the sweep at the first exposure level immediately so the
+                    # next EXPLORE frame records the correct index=0 setting.
+                    self.policy.execute_exposure(0)
+                    time.sleep(0.1)
+                else:
+                    self.state = "MONITOR"
+            else:
+                # Execute next zoom action
+                next_zoom = self.policy.zoom_levels[self.zoom_step]
+                self.policy.set_zoom(next_zoom)
 
     def _apply_best_action(self):
         """Find the exposure index with lowest uncertainty."""
@@ -163,9 +230,18 @@ class ActivePerceptionLoop:
         candidates = [idx for idx, score in self.exploration_results.items() 
                      if abs(score - min_score) < 0.01]
                      
-        # 3. Tie-breaking: Prefer higher exposure (e.g. -3 is better than -8)
-        # Assuming higher index = higher exposure value in our policy list
-        best_idx = max(candidates)
+        # 3. Tie-breaking: Prefer a "good default" exposure.
+        # Previously we preferred the brightest (highest index), which often picks -2
+        # when multiple levels tie. For general cases this can be too bright, so we
+        # prefer the candidate whose exposure value is closest to -4.
+        preferred_exposure_val = -4
+        best_idx = min(
+            candidates,
+            key=lambda idx: (
+                abs(self.policy.exposure_levels[idx] - preferred_exposure_val),
+                self.policy.exposure_levels[idx],  # if equally close, prefer darker (more negative)
+            ),
+        )
         best_score = self.exploration_results[best_idx]
         
         print(f"\n[V] Exploration Done. Winner: Level {best_idx} (Score {best_score:.2f})")
@@ -176,6 +252,33 @@ class ActivePerceptionLoop:
         # Reset baseline so MONITOR captures the new brightness as "Normal"
         self.baseline_brightness = None
         self.ignore_until_frame = self.frame_count + 10 # Ignore 10 frames for camera settling
+
+    def _apply_best_zoom(self):
+        """Find the zoom index with lowest uncertainty."""
+        if not self.zoom_exploration_results:
+            return
+            
+        # 1. Find the minimum score
+        min_score = min(self.zoom_exploration_results.values())
+        
+        # 2. Find all indices that have this score (or very close)
+        candidates = [idx for idx, score in self.zoom_exploration_results.items() 
+                     if abs(score - min_score) < 0.01]
+                     
+        # 3. Tie-breaking: Prefer lower zoom (wider FOV)
+        best_idx = min(candidates)
+        best_score = self.zoom_exploration_results[best_idx]
+        
+        print(f"\n[V] Zoom Exploration Done. Winner: Level {best_idx} (Score {best_score:.2f})")
+        
+        best_zoom = self.policy.zoom_levels[best_idx]
+        self.policy.set_zoom(best_zoom)
+        self.current_zoom_idx = best_idx
+        self.zoom_initialized = True
+        
+        # Reset baseline so MONITOR captures the new size as "Normal"
+        self.baseline_size = None
+        self.zoom_ignore_until_frame = self.frame_count + 5
 
     def _draw_hud(self, frame, uncertainty, metrics, corners, ids):
         """
