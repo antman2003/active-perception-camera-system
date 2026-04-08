@@ -36,6 +36,77 @@ class ActionPolicy:
         self.zoom_levels = [1.0, 1.5, 2.0, 3.0,4.0]
         self.current_zoom_level = 1.0 # Default start
 
+        # ROI center on the full input frame (normalized 0..1). Default = image center.
+        # Only used when current_zoom_level > 1.0.
+        self._roi_nx = 0.5
+        self._roi_ny = 0.5
+
+    def reset_roi_center(self) -> None:
+        """Reset digital ROI to the image center (1.0x zoom behavior)."""
+        self._roi_nx = 0.5
+        self._roi_ny = 0.5
+
+    def _roi_norm_bounds(self) -> tuple:
+        """Valid (lo, hi) for normalized ROI center at current zoom (prevents crop overflow)."""
+        z = self.current_zoom_level
+        if z <= 1.0:
+            return 0.5, 0.5
+        lo = 1.0 / (2.0 * z)
+        hi = 1.0 - lo
+        return lo, hi
+
+    def _clamp_roi_norm(self, nx: float, ny: float) -> tuple:
+        z = self.current_zoom_level
+        if z <= 1.0:
+            return 0.5, 0.5
+        lo, hi = self._roi_norm_bounds()
+        return max(lo, min(hi, nx)), max(lo, min(hi, ny))
+
+    def set_roi_center(self, nx: float, ny: float) -> None:
+        """Set ROI center in normalized full-frame coordinates."""
+        if self.current_zoom_level <= 1.0:
+            self.reset_roi_center()
+            return
+        self._roi_nx, self._roi_ny = self._clamp_roi_norm(nx, ny)
+
+    def nudge_roi_towards(self, nx: float, ny: float, gain: float = 0.15) -> None:
+        """Move ROI center one step toward a target (e.g. marker) in normalized full-frame coords."""
+        if self.current_zoom_level <= 1.0:
+            return
+        tx, ty = self._clamp_roi_norm(nx, ny)
+        self._roi_nx += gain * (tx - self._roi_nx)
+        self._roi_ny += gain * (ty - self._roi_ny)
+        self._roi_nx, self._roi_ny = self._clamp_roi_norm(self._roi_nx, self._roi_ny)
+
+    def _digital_zoom_crop_rect(self, w: int, h: int) -> tuple:
+        """
+        Crop rectangle on the full frame for the current zoom + ROI.
+        Matches apply_digital_zoom geometry (integer crop size, top-left clamped to image).
+        """
+        z = self.current_zoom_level
+        new_w = int(w / z)
+        new_h = int(h / z)
+        cx = int(self._roi_nx * w)
+        cy = int(self._roi_ny * h)
+        x1 = cx - new_w // 2
+        y1 = cy - new_h // 2
+        x1 = max(0, min(x1, w - new_w))
+        y1 = max(0, min(y1, h - new_h))
+        return x1, y1, new_w, new_h
+
+    def marker_center_to_full_norm(self, mx: float, my: float, w: int, h: int) -> tuple:
+        """
+        Map marker center (pixels) in the zoomed output image back to normalized coords on the full input frame.
+        """
+        if self.current_zoom_level <= 1.0:
+            return mx / w, my / h
+        x1, y1, new_w, new_h = self._digital_zoom_crop_rect(w, h)
+        sx = mx * new_w / float(w)
+        sy = my * new_h / float(h)
+        full_x = x1 + sx
+        full_y = y1 + sy
+        return full_x / w, full_y / h
+
     def apply_digital_zoom(self, frame):
         """
         Apply current zoom level to the frame (Center Crop & Resize).
@@ -50,15 +121,10 @@ class ActionPolicy:
             return frame
             
         h, w = frame.shape[:2]
-        center_x, center_y = w // 2, h // 2
         
         # Calculate crop box size
         # If zoom is 2.0, we want 1/2 the width and height
-        new_w = int(w / self.current_zoom_level)
-        new_h = int(h / self.current_zoom_level)
-        
-        x1 = center_x - new_w // 2
-        y1 = center_y - new_h // 2
+        x1, y1, new_w, new_h = self._digital_zoom_crop_rect(w, h)
         x2 = x1 + new_w
         y2 = y1 + new_h
         
@@ -78,6 +144,10 @@ class ActionPolicy:
         """
         if level in self.zoom_levels:
             self.current_zoom_level = level
+            if level <= 1.0:
+                self.reset_roi_center()
+            else:
+                self._roi_nx, self._roi_ny = self._clamp_roi_norm(self._roi_nx, self._roi_ny)
             print(f"Action: Setting Zoom to {level}x")
         else:
             print(f"Warning: Invalid zoom level {level}. Ignoring.")
