@@ -30,12 +30,12 @@ def _aruco_centroid_pixel(corners) -> tuple:
 
 
 class ActivePerceptionLoop:
-    def __init__(self):
+    def __init__(self, camera_id: int = 1):
         print("Initializing System Modules...")
         
         # 1. Hardware
         # TIP: Change to 0 if using integrated webcam
-        self.camera = Camera(1)
+        self.camera = Camera(camera_id)
         
         # 2. Perception & Brain
         self.perception = PerceptionSystem()
@@ -72,8 +72,7 @@ class ActivePerceptionLoop:
         self._roi_lost_frames = 0
         self._roi_lost_threshold = 8
         self._sniper_recovery_active = False
-        self._sniper_target_zoom = 1.0
-        self._sniper_timeout_frames = 15
+        self._sniper_timeout_frames = 60 # Wait 2 seconds in wide-angle before giving up
         self._sniper_frame_count = 0
         
         # Initialize camera to default
@@ -108,21 +107,36 @@ class ActivePerceptionLoop:
                     self._sniper_frame_count += 1
                     
                     if detected and corners is not None:
-                        # Found it! Lock on it and zoom back in.
+                        # Found it! Center ROI on target, but STAY at 1.0x.
+                        # Reset initialization flags so the state machine re-optimizes zoom from scratch.
                         cent = _aruco_centroid_pixel(corners)
                         if cent is not None:
                             mx, my = cent
                             hh, ww = frame.shape[:2]
                             tnx, tny = self.policy.marker_center_to_full_norm(mx, my, ww, hh)
                             self.policy.set_roi_center(tnx, tny)
-                            self.policy.set_zoom(self._sniper_target_zoom)
-                            print(f"[V] Sniper Locked! Zoom restored to {self._sniper_target_zoom}x")
+                            
+                            print("[V] Sniper Locked! Target found at 1.0x. Triggering re-optimization.")
                             self._sniper_recovery_active = False
+                            
+                            # Force state machine to do a fresh EXPLORE_ZOOM
+                            self.zoom_initialized = False
+                            self.baseline_size = None
+                            self.current_zoom_idx = 0
+                            
+                            # Stabilize before state machine starts reading garbage
+                            self.ignore_until_frame = self.frame_count + 5
+                            self.zoom_ignore_until_frame = self.frame_count + 5
                     
                     if self._sniper_recovery_active and self._sniper_frame_count >= self._sniper_timeout_frames:
                         # Timeout. Fallback to normal exploration.
-                        print("[!] Sniper Timeout! Falling back to normal state machine.")
+                        print("[!] Sniper Timeout! Target completely lost. Calming down at 1.0x.")
                         self._sniper_recovery_active = False
+                        
+                        # Reset zoom initialization so that when it reappears, it triggers EXPLORE_ZOOM to re-optimize
+                        self.zoom_initialized = False
+                        self.baseline_size = None
+                        self.current_zoom_idx = 0
                 else:
                     if self.state == "MONITOR" and self.policy.current_zoom_level > 1.0:
                         if not detected:
@@ -184,11 +198,10 @@ class ActivePerceptionLoop:
     def _start_sniper_recovery(self) -> None:
         self._sniper_recovery_active = True
         self._sniper_frame_count = 0
-        self._sniper_target_zoom = self.policy.current_zoom_level
         self._roi_lost_frames = 0
         
         # Action: Zoom out immediately to full view.
-        print(f"[i] Sniper Recovery started! Target lost at {self._sniper_target_zoom}x zoom.")
+        print(f"[i] Sniper Recovery started! Target lost at {self.policy.current_zoom_level}x zoom.")
         self.policy.set_zoom(1.0)
 
     def _update_state_machine(self, uncertainty, current_brightness, size_value, detected):
@@ -347,6 +360,7 @@ class ActivePerceptionLoop:
         
         # Reset baseline so MONITOR captures the new brightness as "Normal"
         self.baseline_brightness = None
+        self.baseline_size = None  # Reset size baseline to avoid false zoom triggers after exposure changes
         self.ignore_until_frame = self.frame_count + 10 # Ignore 10 frames for camera settling
 
     def _apply_best_zoom(self):
