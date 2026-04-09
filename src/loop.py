@@ -29,17 +29,6 @@ def _aruco_centroid_pixel(corners) -> tuple:
     return mx, my
 
 
-def _zoom_aware_roi_grid(z: float) -> list:
-    """3x3 normalized ROI centers valid for digital zoom z (Session 9)."""
-    if z <= 1.0:
-        return [(0.5, 0.5)]
-    lo = 1.0 / (2.0 * z)
-    hi = 1.0 - lo
-    mid = (lo + hi) / 2.0
-    xs = (lo, mid, hi)
-    return [(nx, ny) for ny in xs for nx in xs]
-
-
 class ActivePerceptionLoop:
     def __init__(self):
         print("Initializing System Modules...")
@@ -79,18 +68,13 @@ class ActivePerceptionLoop:
         self.size_change_floor = 200.0
         self.zoom_initialized = False
 
-        # Session 9: ROI scan / track (only when zoom > 1.0, state MONITOR)
+        # Session 9: Sniper Recovery / track (only when zoom > 1.0, state MONITOR)
         self._roi_lost_frames = 0
-        self._roi_scanning = False
-        self._roi_scan_grid = []
-        self._roi_scan_idx = 0
-        self._roi_scan_dwell_frames = 5
-        self._roi_scan_dwell_count = 0
-        self._roi_scan_u_sum = 0.0
-        self._roi_scan_u_n = 0
-        self._roi_scan_any_detected = False
-        self._roi_scan_cell_records = []
         self._roi_lost_threshold = 8
+        self._sniper_recovery_active = False
+        self._sniper_target_zoom = 1.0
+        self._sniper_timeout_frames = 15
+        self._sniper_frame_count = 0
         
         # Initialize camera to default
         if self.policy.exposure_supported:
@@ -120,8 +104,25 @@ class ActivePerceptionLoop:
                 current_brightness = np.mean(frame)
                 size_value = metrics.get("size_raw", 0.0)
 
-                if self._roi_scanning:
-                    self._step_roi_scan(smooth_u, detected)
+                if self._sniper_recovery_active:
+                    self._sniper_frame_count += 1
+                    
+                    if detected and corners is not None:
+                        # Found it! Lock on it and zoom back in.
+                        cent = _aruco_centroid_pixel(corners)
+                        if cent is not None:
+                            mx, my = cent
+                            hh, ww = frame.shape[:2]
+                            tnx, tny = self.policy.marker_center_to_full_norm(mx, my, ww, hh)
+                            self.policy.set_roi_center(tnx, tny)
+                            self.policy.set_zoom(self._sniper_target_zoom)
+                            print(f"[V] Sniper Locked! Zoom restored to {self._sniper_target_zoom}x")
+                            self._sniper_recovery_active = False
+                    
+                    if self._sniper_recovery_active and self._sniper_frame_count >= self._sniper_timeout_frames:
+                        # Timeout. Fallback to normal exploration.
+                        print("[!] Sniper Timeout! Falling back to normal state machine.")
+                        self._sniper_recovery_active = False
                 else:
                     if self.state == "MONITOR" and self.policy.current_zoom_level > 1.0:
                         if not detected:
@@ -131,7 +132,7 @@ class ActivePerceptionLoop:
                     elif self.state != "MONITOR":
                         self._roi_lost_frames = 0
 
-                    scan_started = False
+                    sniper_started = False
                     if (
                         self.state == "MONITOR"
                         and self.policy.current_zoom_level > 1.0
@@ -139,15 +140,15 @@ class ActivePerceptionLoop:
                         and self.frame_count >= self.ignore_until_frame
                         and self.frame_count >= self.zoom_ignore_until_frame
                     ):
-                        self._start_roi_scan()
-                        scan_started = True
+                        self._start_sniper_recovery()
+                        sniper_started = True
 
-                    if not scan_started:
+                    if not sniper_started:
                         self._update_state_machine(smooth_u, current_brightness, size_value, detected)
 
                 # Nudge ROI toward marker for next frame (zoomed + stable MONITOR only)
                 if (
-                    not self._roi_scanning
+                    not self._sniper_recovery_active
                     and self.state == "MONITOR"
                     and self.policy.current_zoom_level > 1.0
                     and self.frame_count >= self.ignore_until_frame
@@ -173,87 +174,22 @@ class ActivePerceptionLoop:
             self.camera.release()
             print("System Shutdown.")
 
-    def _cancel_roi_scan(self) -> None:
-        if not self._roi_scanning:
+    def _cancel_sniper_recovery(self) -> None:
+        if not self._sniper_recovery_active:
             return
-        self._roi_scanning = False
-        self._roi_scan_grid = []
-        self._roi_scan_idx = 0
-        self._roi_scan_dwell_count = 0
-        self._roi_scan_u_sum = 0.0
-        self._roi_scan_u_n = 0
-        self._roi_scan_any_detected = False
-        self._roi_scan_cell_records = []
-        print("[i] ROI scan cancelled")
+        self._sniper_recovery_active = False
+        self._sniper_frame_count = 0
+        print("[i] Sniper Recovery cancelled")
 
-    def _start_roi_scan(self) -> None:
-        self._roi_scanning = True
-        self._roi_scan_grid = _zoom_aware_roi_grid(self.policy.current_zoom_level)
-        self._roi_scan_idx = 0
-        self._roi_scan_dwell_count = 0
-        self._roi_scan_u_sum = 0.0
-        self._roi_scan_u_n = 0
-        self._roi_scan_any_detected = False
-        self._roi_scan_cell_records = []
+    def _start_sniper_recovery(self) -> None:
+        self._sniper_recovery_active = True
+        self._sniper_frame_count = 0
+        self._sniper_target_zoom = self.policy.current_zoom_level
         self._roi_lost_frames = 0
-        nx, ny = self._roi_scan_grid[0]
-        self.policy.set_roi_center(nx, ny)
-        print("[i] ROI scan started (target lost while zoomed in)")
-
-    def _step_roi_scan(self, uncertainty: float, detected: bool) -> None:
-        self._roi_scan_u_sum += uncertainty
-        self._roi_scan_u_n += 1
-        if detected:
-            self._roi_scan_any_detected = True
-        self._roi_scan_dwell_count += 1
-        if self._roi_scan_dwell_count < self._roi_scan_dwell_frames:
-            return
-
-        mean_u = self._roi_scan_u_sum / max(1, self._roi_scan_u_n)
-        nx, ny = self._roi_scan_grid[self._roi_scan_idx]
-        self._roi_scan_cell_records.append(
-            {
-                "idx": self._roi_scan_idx,
-                "mean_u": mean_u,
-                "detected": self._roi_scan_any_detected,
-                "nx": nx,
-                "ny": ny,
-            }
-        )
-
-        self._roi_scan_idx += 1
-        self._roi_scan_dwell_count = 0
-        self._roi_scan_u_sum = 0.0
-        self._roi_scan_u_n = 0
-        self._roi_scan_any_detected = False
-
-        if self._roi_scan_idx >= len(self._roi_scan_grid):
-            self._finish_roi_scan()
-            return
-
-        nx2, ny2 = self._roi_scan_grid[self._roi_scan_idx]
-        self.policy.set_roi_center(nx2, ny2)
-
-    def _finish_roi_scan(self) -> None:
-        records = self._roi_scan_cell_records
-        self._roi_scanning = False
-        self._roi_scan_grid = []
-        self._roi_scan_idx = 0
-        self._roi_scan_dwell_count = 0
-        self._roi_scan_u_sum = 0.0
-        self._roi_scan_u_n = 0
-        self._roi_scan_any_detected = False
-        self._roi_scan_cell_records = []
-
-        if not records:
-            return
-
-        records.sort(key=lambda r: (not r["detected"], r["mean_u"]))
-        best = records[0]
-        self.policy.set_roi_center(best["nx"], best["ny"])
-        print(
-            f"[V] ROI scan done. cell={best['idx']} detected={best['detected']} mean_u={best['mean_u']:.3f}"
-        )
+        
+        # Action: Zoom out immediately to full view.
+        print(f"[i] Sniper Recovery started! Target lost at {self._sniper_target_zoom}x zoom.")
+        self.policy.set_zoom(1.0)
 
     def _update_state_machine(self, uncertainty, current_brightness, size_value, detected):
         """
@@ -290,7 +226,7 @@ class ActivePerceptionLoop:
             if uncertainty > TRIGGER_THRESHOLD:
                 if env_changed:
                     print(f"[!] Triggering EXPLORE (Score: {uncertainty:.2f})")
-                    self._cancel_roi_scan()
+                    self._cancel_sniper_recovery()
                     self.state = "EXPLORE"
                     self.explore_step = 0
                     self.exploration_results = {}
@@ -315,7 +251,7 @@ class ActivePerceptionLoop:
             
             if (not self.zoom_initialized) or size_changed:
                 print(f"[!] Triggering ZOOM EXPLORE (Score: {uncertainty:.2f})")
-                self._cancel_roi_scan()
+                self._cancel_sniper_recovery()
                 self.state = "EXPLORE_ZOOM"
                 self.zoom_step = 0
                 self.zoom_exploration_results = {}
@@ -451,7 +387,7 @@ class ActivePerceptionLoop:
             
         # 2. Status Bar
         color = (0, 255, 0) if self.state == "MONITOR" else (0, 255, 255)
-        mode = f"{self.state}+ROI_SCAN" if self._roi_scanning else self.state
+        mode = f"{self.state}+SNIPER" if self._sniper_recovery_active else self.state
         
         cv2.putText(annotated, f"MODE: {mode}", (220, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
