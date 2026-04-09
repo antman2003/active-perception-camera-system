@@ -399,6 +399,11 @@ class ActivePerceptionLoop:
         cv2.putText(annotated, f"Uncertainty: {uncertainty:.2f}", (220, 65), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
                    
+        # 4. Zoom Level HUD
+        zoom_text = f"ZOOM: {self.policy.current_zoom_level}x"
+        cv2.putText(annotated, zoom_text, (10, 100), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                   
         return annotated
 
 if __name__ == "__main__":
