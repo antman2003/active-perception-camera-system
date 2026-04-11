@@ -418,6 +418,12 @@ class ActivePerceptionLoop:
         cv2.putText(annotated, zoom_text, (10, 100), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
                    
+        # 5. Debug Info (Sharpness & Size)
+        cv2.putText(annotated, f"Sharpness: {metrics.get('sharpness_raw', 0):.0f}", (10, 130),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+        cv2.putText(annotated, f"Size: {metrics.get('size_raw', 0):.0f}", (10, 150),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                   
         return annotated
 
 if __name__ == "__main__":
