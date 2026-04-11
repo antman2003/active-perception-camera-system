@@ -22,8 +22,14 @@ class UncertaintyEngine:
     Computes "Uncertainty Score" (0.0 to 1.0) for a single frame.
     0.0 = Perfect confidence
     1.0 = Total uncertainty (blind)
+    Hyperparameter tuning:
+    -Size high: marker 走到能接受的最近的最清晰的位置
+    -Size low: marker 走到能接受的最远的勉强能看清的位置
+    -
+    
     """
     
+
     def __init__(self, 
                  sharpness_low=20.0, sharpness_high=300.0,
                  size_low=800.0, size_high=100000):
