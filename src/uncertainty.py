@@ -23,16 +23,16 @@ class UncertaintyEngine:
     0.0 = Perfect confidence
     1.0 = Total uncertainty (blind)
     Hyperparameter tuning:
-    -Size high: marker 走到能接受的最近的最清晰的位置
-    -Size low: marker 走到能接受的最远的勉强能看清的位置
+    -Size high: marker 走到能接受的最近的最清晰的位置 150000
+    -Size low: marker 走到能接受的最远的勉强能看清的位置 500
     -
     
     """
     
 
     def __init__(self, 
-                 sharpness_low=20.0, sharpness_high=300.0,
-                 size_low=800.0, size_high=100000):
+                 sharpness_low=20.0, sharpness_high=500.0,
+                 size_low=500.0, size_high=150000):
         """
         Args:
             sharpness_low/high: Thresholds for Laplacian variance.
