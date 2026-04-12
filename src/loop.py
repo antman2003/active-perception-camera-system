@@ -45,11 +45,29 @@ class ActivePerceptionLoop:
         self.size_change_floor = 200.0
         self.zoom_initialized = False
 
-        # Sweep timing parameters. Tune here instead of editing state logic.
+        # Stability and sweep parameters. Tune here instead of editing state logic.
+        self.monitor_explore_enter_threshold = 0.60
+        self.monitor_explore_exit_threshold = 0.50
+        self.monitor_zoom_enter_threshold = 0.55
+        self.monitor_zoom_exit_threshold = 0.45
+        self.monitor_explore_trigger_frames = 2
+        self.monitor_zoom_trigger_frames = 2
+        self.monitor_roi_lost_threshold = 8
+        self.monitor_nudge_gain = 0.15
+        self.sniper_timeout_frames = 60
+
         self.exposure_settle_frames = 2
         self.exposure_sample_frames = 3
         self.zoom_settle_frames = 1
         self.zoom_sample_frames = 2
+
+        # Detection debounce state.
+        self.detect_confirm_frames = 2
+        self.lost_confirm_frames = 3
+        self.detected_streak = 0
+        self.lost_streak = 0
+        self.confirmed_detected = False
+        self.confirmed_lost = True
         
         # Initialize camera to default
         if self.policy.exposure_supported:
@@ -76,6 +94,15 @@ class ActivePerceptionLoop:
                 # --- Step 2: Perceive ---
                 frame = self.policy.apply_digital_zoom(frame)
                 detected, ids, corners = self.perception.detect(frame)
+                if detected:
+                    self.detected_streak += 1
+                    self.lost_streak = 0
+                else:
+                    self.lost_streak += 1
+                    self.detected_streak = 0
+
+                self.confirmed_detected = self.detected_streak >= self.detect_confirm_frames
+                self.confirmed_lost = self.lost_streak >= self.lost_confirm_frames
                 
                 # --- Step 3: Evaluate (Brain) ---
                 raw_u, metrics = self.uncertainty_engine.compute(frame, corners)

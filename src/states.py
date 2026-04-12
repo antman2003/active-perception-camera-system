@@ -48,9 +48,25 @@ class MonitorState(State):
     def __init__(self):
         super().__init__()
         self.name = "MONITOR"
-        self.TRIGGER_THRESHOLD = 0.6
         self.roi_lost_frames = 0
         self.roi_lost_threshold = 8
+        self.explore_enter_threshold = 0.60
+        self.explore_exit_threshold = 0.50
+        self.zoom_enter_threshold = 0.55
+        self.zoom_exit_threshold = 0.45
+        self.explore_trigger_frames = 2
+        self.zoom_trigger_frames = 2
+        self._explore_trigger_count = 0
+        self._zoom_trigger_count = 0
+
+    def on_enter(self, context):
+        self.roi_lost_threshold = context.monitor_roi_lost_threshold
+        self.explore_enter_threshold = context.monitor_explore_enter_threshold
+        self.explore_exit_threshold = context.monitor_explore_exit_threshold
+        self.zoom_enter_threshold = context.monitor_zoom_enter_threshold
+        self.zoom_exit_threshold = context.monitor_zoom_exit_threshold
+        self.explore_trigger_frames = context.monitor_explore_trigger_frames
+        self.zoom_trigger_frames = context.monitor_zoom_trigger_frames
 
     def update(self, context, frame, detected, corners, ids, smooth_u, raw_u, metrics, current_brightness, size_value):
         # 1. Stabilization Check (Cooldown)
@@ -74,40 +90,54 @@ class MonitorState(State):
                 env_changed = True
                 print(f"[!] Lighting Changed! Diff: {diff:.1f} baseline: {context.baseline_brightness:.1f} (Thresh: {dynamic_threshold:.1f})")
 
-        # 4. Trigger EXPOSURE EXPLORE if uncertain and environment changed
-        if uncertainty > self.TRIGGER_THRESHOLD:
-            if env_changed:
-                print(f"[!] Triggering EXPLORE (Score: {uncertainty:.2f})")
-                context.baseline_brightness = None
-                return ExploreExposureState()
+        # 4. Trigger EXPOSURE EXPLORE with hysteresis + consecutive-frame gating
+        if env_changed and uncertainty >= self.explore_enter_threshold:
+            self._explore_trigger_count += 1
+        elif (not env_changed) or (uncertainty <= self.explore_exit_threshold):
+            self._explore_trigger_count = 0
+
+        if self._explore_trigger_count >= self.explore_trigger_frames:
+            print(f"[!] Triggering EXPLORE (Score: {uncertainty:.2f})")
+            context.baseline_brightness = None
+            self._explore_trigger_count = 0
+            return ExploreExposureState()
 
         # 5. Check Target Size Change and Quality
         if context.frame_count >= context.zoom_ignore_until_frame:
-            if context.baseline_size is None and detected:
+            if context.baseline_size is None and context.confirmed_detected:
                 context.baseline_size = size_value
                 print(f"[i] Baseline Size Set: {context.baseline_size:.1f}")
             
             size_changed = False
             if context.baseline_size is not None:
-                if detected:
+                if context.confirmed_detected:
                     size_diff = abs(size_value - context.baseline_size)
                     size_threshold = max(context.baseline_size * context.size_change_ratio, context.size_change_floor)
                     if size_diff > size_threshold:
                         size_changed = True
                         print(f"[!] Size Changed! Diff: {size_diff:.1f} baseline: {context.baseline_size:.1f} (Thresh: {size_threshold:.1f})")
                 else:
-                    if context.policy.current_zoom_level <= 1.0:
+                    if context.confirmed_lost and context.policy.current_zoom_level <= 1.0:
                         size_changed = True
                         print("[!] Target lost at 1.0x! Triggering Zoom Search.")
             
             poor_quality_at_base = (
-                detected 
-                and (uncertainty > 0.55) 
+                context.confirmed_detected
+                and (uncertainty >= self.zoom_enter_threshold)
                 and (context.policy.current_zoom_level <= 1.0)
                 and (not context.zoom_initialized)
             )
             if poor_quality_at_base:
+                self._zoom_trigger_count += 1
+            elif uncertainty <= self.zoom_exit_threshold or context.confirmed_lost or context.policy.current_zoom_level > 1.0:
+                self._zoom_trigger_count = 0
+
+            if self._zoom_trigger_count >= self.zoom_trigger_frames:
                 print(f"[!] Poor quality at base (Score: {uncertainty:.2f}). Forcing Zoom Search.")
+                self._zoom_trigger_count = 0
+                poor_quality_at_base = True
+            else:
+                poor_quality_at_base = False
             
             # 6. Trigger ZOOM EXPLORE
             if (not context.zoom_initialized) or size_changed or poor_quality_at_base:
@@ -117,9 +147,9 @@ class MonitorState(State):
 
         # 7. Zoomed-in Logic: Nudge Tracking or Sniper Recovery
         if context.policy.current_zoom_level > 1.0:
-            if not detected:
+            if context.confirmed_lost:
                 self.roi_lost_frames += 1
-            else:
+            elif context.confirmed_detected:
                 self.roi_lost_frames = 0
                 
             # Trigger Sniper Recovery if lost for too long
@@ -134,7 +164,7 @@ class MonitorState(State):
                     mx, my = cent
                     hh, ww = frame.shape[:2]
                     tnx, tny = context.policy.marker_center_to_full_norm(mx, my, ww, hh)
-                    context.policy.nudge_roi_towards(tnx, tny, gain=0.15)
+                    context.policy.nudge_roi_towards(tnx, tny, gain=context.monitor_nudge_gain)
                     
         return self
 
@@ -242,7 +272,7 @@ class ExploreZoomState(State):
         self._target_center = None
 
     def update(self, context, frame, detected, corners, ids, smooth_u, raw_u, metrics, current_brightness, size_value):
-        if detected and corners is not None:
+        if context.confirmed_detected and detected and corners is not None:
             cent = _aruco_centroid_pixel(corners)
             if cent is not None:
                 mx, my = cent
@@ -326,6 +356,7 @@ class SniperRecoveryState(State):
         self.sniper_timeout_frames = 60
         
     def on_enter(self, context):
+        self.sniper_timeout_frames = context.sniper_timeout_frames
         print(f"[i] Sniper Recovery started! Target lost at {context.policy.current_zoom_level}x zoom.")
         context.policy.set_zoom(1.0)
 
@@ -371,7 +402,7 @@ class PhysicalSearchState(State):
 
     def update(self, context, frame, detected, corners, ids, smooth_u, raw_u, metrics, current_brightness, size_value):
         # We are at 1.0x zoom and waiting for target.
-        if detected:
+        if context.confirmed_detected:
             print("[i] Target re-entered scene. Resuming normal operations.")
             context.ignore_until_frame = context.frame_count + 5
             context.zoom_ignore_until_frame = context.frame_count + 5
