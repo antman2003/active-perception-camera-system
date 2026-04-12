@@ -52,13 +52,18 @@ class UncertaintyEngine:
             metrics (dict): Raw values for debugging (sharpness, area, etc.)
         """
         # 1. Compute Raw Metrics
-        sharpness_val = self._compute_sharpness(frame)
+        full_sharpness_val = self._compute_sharpness(frame)
+        sharpness_val = full_sharpness_val
         
         detected = (corners is not None and len(corners) > 0)
         area_val = 0.0
         if detected:
             # Use the area of the first marker
             area_val = cv2.contourArea(corners[0])
+            # When evaluating zoom, full-frame sharpness is misleading because
+            # digital zoom softens the whole resized image. Score sharpness on
+            # the marker neighborhood instead of the full frame.
+            sharpness_val = self._compute_marker_sharpness(frame, corners[0], fallback=full_sharpness_val)
 
         # 2. Normalize to Quality (0.0=Bad, 1.0=Good)
         q_sharpness = self._normalize(sharpness_val, self.s_low, self.s_high)
@@ -76,8 +81,8 @@ class UncertaintyEngine:
             # Penalty for blur: up to 0.4
             # Penalty for small size: up to 0.4
             
-            penalty_blur = (1.0 - q_sharpness) * 0.4
-            penalty_size = (1.0 - q_size) * 0.4
+            penalty_blur = (1.0 - q_sharpness) * 0.3
+            penalty_size = (1.0 - q_size) * 0.5
             
             score = 0.1 + penalty_blur + penalty_size
 
@@ -87,6 +92,7 @@ class UncertaintyEngine:
         metrics = {
             "detected": detected,
             "sharpness_raw": sharpness_val,
+            "sharpness_full_raw": full_sharpness_val,
             "size_raw": area_val,
             "q_sharpness": q_sharpness,
             "q_size": q_size
@@ -108,6 +114,37 @@ class UncertaintyEngine:
             gray = frame
             
         return cv2.Laplacian(gray, cv2.CV_64F).var()
+
+    def _compute_marker_sharpness(self, frame: np.ndarray, marker_corners: np.ndarray, fallback: float) -> float:
+        """
+        Compute sharpness around the detected marker instead of the whole frame.
+        This makes digital zoom comparisons fairer because resize interpolation
+        affects the entire image, while we really care about target detail.
+        """
+        if frame is None or marker_corners is None or len(marker_corners) == 0:
+            return fallback
+
+        h, w = frame.shape[:2]
+        pts = marker_corners.reshape(-1, 2)
+        x, y, bw, bh = cv2.boundingRect(pts.astype(np.float32))
+
+        # Expand the box a bit so the metric includes marker edges plus a small
+        # amount of nearby context, but still stays target-centric.
+        pad_x = max(8, bw // 4)
+        pad_y = max(8, bh // 4)
+        x1 = max(0, x - pad_x)
+        y1 = max(0, y - pad_y)
+        x2 = min(w, x + bw + pad_x)
+        y2 = min(h, y + bh + pad_y)
+
+        if x2 <= x1 or y2 <= y1:
+            return fallback
+
+        roi = frame[y1:y2, x1:x2]
+        if roi.size == 0:
+            return fallback
+
+        return self._compute_sharpness(roi)
 
     def _normalize(self, value, low, high) -> float:
         """Map value to 0.0-1.0 range based on thresholds."""

@@ -46,28 +46,33 @@ class ActionPolicy:
         self._roi_nx = 0.5
         self._roi_ny = 0.5
 
-    def _roi_norm_bounds(self) -> tuple:
-        """Valid (lo, hi) for normalized ROI center at current zoom (prevents crop overflow)."""
-        z = self.current_zoom_level
+    def _roi_norm_bounds_for_zoom(self, zoom_level: float) -> tuple:
+        """Valid (lo, hi) for normalized ROI center at a given zoom."""
+        z = zoom_level
         if z <= 1.0:
             return 0.5, 0.5
         lo = 1.0 / (2.0 * z)
         hi = 1.0 - lo
         return lo, hi
 
-    def _clamp_roi_norm(self, nx: float, ny: float) -> tuple:
-        z = self.current_zoom_level
+    def _roi_norm_bounds(self) -> tuple:
+        """Valid (lo, hi) for normalized ROI center at current zoom (prevents crop overflow)."""
+        return self._roi_norm_bounds_for_zoom(self.current_zoom_level)
+
+    def _clamp_roi_norm(self, nx: float, ny: float, zoom_level: float = None) -> tuple:
+        z = self.current_zoom_level if zoom_level is None else zoom_level
         if z <= 1.0:
             return 0.5, 0.5
-        lo, hi = self._roi_norm_bounds()
+        lo, hi = self._roi_norm_bounds_for_zoom(z)
         return max(lo, min(hi, nx)), max(lo, min(hi, ny))
 
-    def set_roi_center(self, nx: float, ny: float) -> None:
+    def set_roi_center(self, nx: float, ny: float, zoom_level: float = None) -> None:
         """Set ROI center in normalized full-frame coordinates."""
-        if self.current_zoom_level <= 1.0:
+        z = self.current_zoom_level if zoom_level is None else zoom_level
+        if z <= 1.0:
             self.reset_roi_center()
             return
-        self._roi_nx, self._roi_ny = self._clamp_roi_norm(nx, ny)
+        self._roi_nx, self._roi_ny = self._clamp_roi_norm(nx, ny, zoom_level=z)
 
     def nudge_roi_towards(self, nx: float, ny: float, gain: float = 0.15) -> None:
         """Move ROI center one step toward a target (e.g. marker) in normalized full-frame coords."""
@@ -131,9 +136,9 @@ class ActionPolicy:
         # Crop
         cropped = frame[y1:y2, x1:x2]
         
-        # Resize back to original size (Digital Zoom effect)
-        # using LINEAR or CUBIC for better quality
-        zoomed = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+        # Resize back to original size (Digital Zoom effect).
+        # CUBIC preserves edges better than LINEAR when enlarging crops.
+        zoomed = cv2.resize(cropped, (w, h), interpolation=cv2.INTER_CUBIC)
         
         return zoomed
 
@@ -147,7 +152,7 @@ class ActionPolicy:
             if level <= 1.0:
                 self.reset_roi_center()
             else:
-                self._roi_nx, self._roi_ny = self._clamp_roi_norm(self._roi_nx, self._roi_ny)
+                self._roi_nx, self._roi_ny = self._clamp_roi_norm(self._roi_nx, self._roi_ny, zoom_level=level)
             print(f"Action: Setting Zoom to {level}x")
         else:
             print(f"Warning: Invalid zoom level {level}. Ignoring.")
