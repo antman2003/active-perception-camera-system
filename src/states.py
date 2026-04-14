@@ -21,6 +21,12 @@ def _aruco_centroid_pixel(corners) -> tuple:
     return mx, my
 
 
+def _log_event(context, event_type: str, frame=None, screenshot_name=None, **payload) -> None:
+    logger = getattr(context, "blackbox", None)
+    if logger is not None:
+        logger.log_event(event_type, frame=frame, screenshot_name=screenshot_name, **payload)
+
+
 class State:
     """Base State Class."""
     def __init__(self):
@@ -100,6 +106,13 @@ class MonitorState(State):
             print(f"[!] Triggering EXPLORE (Score: {uncertainty:.2f})")
             context.baseline_brightness = None
             self._explore_trigger_count = 0
+            _log_event(
+                context,
+                "explore_exposure_triggered",
+                frame_idx=context.frame_count,
+                reason="env_changed_and_high_uncertainty",
+                smooth_u=uncertainty,
+            )
             return ExploreExposureState()
 
         # 5. Check Target Size Change and Quality
@@ -143,6 +156,18 @@ class MonitorState(State):
             if (not context.zoom_initialized) or size_changed or poor_quality_at_base:
                 print(f"[!] Triggering ZOOM EXPLORE (Score: {uncertainty:.2f})")
                 context.baseline_size = None
+                _log_event(
+                    context,
+                    "explore_zoom_triggered",
+                    frame_idx=context.frame_count,
+                    reason=(
+                        "zoom_uninitialized" if not context.zoom_initialized
+                        else "size_changed" if size_changed
+                        else "poor_quality_at_base"
+                    ),
+                    smooth_u=uncertainty,
+                    size_value=size_value,
+                )
                 return ExploreZoomState()
 
         # 7. Zoomed-in Logic: Nudge Tracking or Sniper Recovery
@@ -155,6 +180,13 @@ class MonitorState(State):
             # Trigger Sniper Recovery if lost for too long
             if self.roi_lost_frames >= self.roi_lost_threshold:
                 if context.frame_count >= context.ignore_until_frame and context.frame_count >= context.zoom_ignore_until_frame:
+                    _log_event(
+                        context,
+                        "sniper_recovery_triggered",
+                        frame_idx=context.frame_count,
+                        reason="confirmed_lost_while_zoomed",
+                        zoom=float(context.policy.current_zoom_level),
+                    )
                     return SniperRecoveryState()
                     
             # Smooth Visual Servoing (Nudge)
@@ -237,6 +269,15 @@ class ExploreExposureState(State):
         
         best_score = self.exploration_results[best_idx]
         print(f"\n[V] Exploration Done. Winner: Level {best_idx} (Score {best_score:.2f})")
+        _log_event(
+            context,
+            "exposure_winner_selected",
+            frame_idx=context.frame_count,
+            winner_index=best_idx,
+            winner_exposure=context.policy.exposure_levels[best_idx],
+            score=best_score,
+            results=self.exploration_results,
+        )
         
         context.policy.execute_exposure(best_idx)
         context.current_exposure_idx = best_idx
@@ -326,6 +367,15 @@ class ExploreZoomState(State):
         best_score = self.zoom_exploration_results[best_idx]
         
         print(f"\n[V] Zoom Exploration Done. Winner: Level {best_idx} (Score {best_score:.2f})")
+        _log_event(
+            context,
+            "zoom_winner_selected",
+            frame_idx=context.frame_count,
+            winner_index=best_idx,
+            winner_zoom=context.policy.zoom_levels[best_idx],
+            score=best_score,
+            results=self.zoom_exploration_results,
+        )
         
         best_zoom = context.policy.zoom_levels[best_idx]
         if self._target_center is not None:
@@ -358,6 +408,12 @@ class SniperRecoveryState(State):
     def on_enter(self, context):
         self.sniper_timeout_frames = context.sniper_timeout_frames
         print(f"[i] Sniper Recovery started! Target lost at {context.policy.current_zoom_level}x zoom.")
+        _log_event(
+            context,
+            "sniper_recovery_started",
+            frame_idx=context.frame_count,
+            zoom=float(context.policy.current_zoom_level),
+        )
         context.policy.set_zoom(1.0)
 
     def update(self, context, frame, detected, corners, ids, smooth_u, raw_u, metrics, current_brightness, size_value):
@@ -372,6 +428,13 @@ class SniperRecoveryState(State):
                 context.policy.set_roi_center(tnx, tny)
                 
                 print("[V] Sniper Locked! Target found at 1.0x. Triggering re-optimization.")
+                _log_event(
+                    context,
+                    "sniper_recovery_locked",
+                    frame=frame,
+                    screenshot_name=f"sniper_lock_f{context.frame_count}",
+                    frame_idx=context.frame_count,
+                )
                 context.zoom_initialized = False
                 context.baseline_size = None
                 context.current_zoom_idx = 0
@@ -382,6 +445,14 @@ class SniperRecoveryState(State):
                 
         if self.sniper_frame_count >= self.sniper_timeout_frames:
             print("[!] Sniper Timeout! Target completely lost. Entering Physical Search.")
+            _log_event(
+                context,
+                "sniper_timeout",
+                frame=frame,
+                screenshot_name=f"sniper_timeout_f{context.frame_count}",
+                frame_idx=context.frame_count,
+                timeout_frames=self.sniper_timeout_frames,
+            )
             context.zoom_initialized = False
             context.baseline_size = None
             context.current_zoom_idx = 0
@@ -404,6 +475,12 @@ class PhysicalSearchState(State):
         # We are at 1.0x zoom and waiting for target.
         if context.confirmed_detected:
             print("[i] Target re-entered scene. Resuming normal operations.")
+            _log_event(
+                context,
+                "physical_search_exit",
+                frame_idx=context.frame_count,
+                reason="target_reentered",
+            )
             context.ignore_until_frame = context.frame_count + 5
             context.zoom_ignore_until_frame = context.frame_count + 5
             return MonitorState()

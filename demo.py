@@ -10,7 +10,7 @@ import argparse
 import sys
 from src.loop import ActivePerceptionLoop
 
-def parse_args():
+def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Active Perception System Demo")
     parser.add_argument(
         "--cam", 
@@ -18,13 +18,19 @@ def parse_args():
         default=1, 
         help="Camera device index (0 for built-in laptop cam, 1 for external USB cam. Default: 1)"
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode with per-frame blackbox logging."
+    )
+    return parser.parse_args(argv)
 
-def print_welcome_message(cam_id):
+def print_welcome_message(cam_id, debug):
     print("="*60)
     print("    Active Perception Camera System - Week 2 Demo")
     print("="*60)
     print(f"[*] Trying to connect to Camera {cam_id}...")
+    print(f"[*] Debug mode: {'ON' if debug else 'OFF'}")
     print("[*] Make sure you have a 6x6 ArUco Marker ready.")
     print("[*] Features Active:")
     print("    - Auto-Exposure Sweep (on lighting change)")
@@ -35,16 +41,17 @@ def print_welcome_message(cam_id):
     print("    Press 'q' in the video window to quit.")
     print("="*60)
 
-def main():
-    args = parse_args()
-    
-    print_welcome_message(args.cam)
-    
+
+def run_full_demo(camera_id: int = 1, debug: bool = False):
+    print_welcome_message(camera_id, debug)
+    app = ActivePerceptionLoop(camera_id=camera_id, debug=debug)
+    app.run()
+
+def main(argv=None):
+    args = parse_args(argv)
+
     try:
-        # Initialize the system with the specified camera ID
-        app = ActivePerceptionLoop(camera_id=args.cam)
-        # Run the infinite perception loop
-        app.run()
+        run_full_demo(camera_id=args.cam, debug=args.debug)
     except RuntimeError as e:
         print(f"\n[ERROR] Failed to start system: {e}")
         print(f"        Is camera {args.cam} connected and not used by another program?")

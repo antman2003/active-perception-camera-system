@@ -169,13 +169,12 @@ class TemporalSmoother:
 
 
 # --- Independent Test ---
-def main():
+def run_uncertainty_demo(camera_id: int = 1):
     from src.camera import Camera
     from src.perception import PerceptionSystem
-    import time
-    
+
     print("Initializing modules...")
-    camera = Camera(1)
+    camera = Camera(camera_id)
     perception = PerceptionSystem()
     uncertainty_engine = UncertaintyEngine()
     smoother = TemporalSmoother(window_size=5)
@@ -221,6 +220,10 @@ def main():
     finally:
         camera.release()
         print("Done.")
+
+
+def main():
+    run_uncertainty_demo()
 
 if __name__ == "__main__":
     main()

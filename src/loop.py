@@ -10,14 +10,16 @@ Refactored to use State Machine (Session 11).
 import cv2
 import time
 import numpy as np
+from collections import deque
 from src.camera import Camera
+from src.logger import BlackboxLogger
 from src.perception import PerceptionSystem
 from src.uncertainty import UncertaintyEngine, TemporalSmoother
 from src.policy import ActionPolicy
 from src.states import MonitorState
 
 class ActivePerceptionLoop:
-    def __init__(self, camera_id: int = 1):
+    def __init__(self, camera_id: int = 1, debug: bool = False):
         print("Initializing System Modules...")
         
         # 1. Hardware
@@ -30,6 +32,8 @@ class ActivePerceptionLoop:
         
         # 3. Action
         self.policy = ActionPolicy(self.camera)
+        self.blackbox = BlackboxLogger(frame_logging_enabled=debug)
+        self.policy.logger = self.blackbox
         
         # 4. Context Variables (accessed by states)
         self.current_exposure_idx = 3
@@ -68,6 +72,7 @@ class ActivePerceptionLoop:
         self.lost_streak = 0
         self.confirmed_detected = False
         self.confirmed_lost = True
+        self.detection_history = deque(maxlen=30)
         
         # Initialize camera to default
         if self.policy.exposure_supported:
@@ -78,6 +83,11 @@ class ActivePerceptionLoop:
         # 5. Initialize State Machine
         self.current_state = MonitorState()
         self.current_state.on_enter(self)
+        self.blackbox.log_event(
+            "session_started",
+            camera_id=camera_id,
+            initial_state=self.current_state.name,
+        )
 
     def run(self):
         print("\n=== Active Perception Loop Started ===")
@@ -103,6 +113,7 @@ class ActivePerceptionLoop:
 
                 self.confirmed_detected = self.detected_streak >= self.detect_confirm_frames
                 self.confirmed_lost = self.lost_streak >= self.lost_confirm_frames
+                self.detection_history.append(1 if detected else 0)
                 
                 # --- Step 3: Evaluate (Brain) ---
                 raw_u, metrics = self.uncertainty_engine.compute(frame, corners)
@@ -111,6 +122,22 @@ class ActivePerceptionLoop:
                 # --- Step 4: Act (State Machine Update) ---
                 current_brightness = np.mean(frame)
                 size_value = metrics.get("size_raw", 0.0)
+                detection_rate = sum(self.detection_history) / len(self.detection_history)
+
+                self.blackbox.log_frame(
+                    frame_idx=self.frame_count,
+                    state=self.current_state.name,
+                    raw_u=raw_u,
+                    smooth_u=smooth_u,
+                    detected=detected,
+                    confirmed_detected=self.confirmed_detected,
+                    confirmed_lost=self.confirmed_lost,
+                    detection_rate=detection_rate,
+                    brightness=float(current_brightness),
+                    zoom=float(self.policy.current_zoom_level),
+                    exposure_idx=self.current_exposure_idx,
+                    metrics=metrics,
+                )
 
                 next_state = self.current_state.update(
                     self, frame, detected, corners, ids, 
@@ -118,6 +145,18 @@ class ActivePerceptionLoop:
                 )
 
                 if next_state != self.current_state:
+                    self.blackbox.log_event(
+                        "state_transition",
+                        frame_idx=self.frame_count,
+                        from_state=self.current_state.name,
+                        to_state=next_state.name,
+                        raw_u=raw_u,
+                        smooth_u=smooth_u,
+                        detected=detected,
+                        confirmed_detected=self.confirmed_detected,
+                        confirmed_lost=self.confirmed_lost,
+                        zoom=float(self.policy.current_zoom_level),
+                    )
                     self.current_state.on_exit(self)
                     self.current_state = next_state
                     self.current_state.on_enter(self)
@@ -130,6 +169,11 @@ class ActivePerceptionLoop:
                     break
                     
         finally:
+            self.blackbox.log_event(
+                "session_stopped",
+                final_state=self.current_state.name,
+                frame_idx=self.frame_count,
+            )
             self.camera.release()
             print("System Shutdown.")
 

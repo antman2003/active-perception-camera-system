@@ -20,6 +20,7 @@ class ActionPolicy:
         Initialize policy and check hardware capabilities.
         """
         self.camera = camera
+        self.logger = None
         self.exposure_supported = self._check_exposure_support()
         
         # Define the "Action Space" (Discrete levels)
@@ -154,6 +155,13 @@ class ActionPolicy:
             else:
                 self._roi_nx, self._roi_ny = self._clamp_roi_norm(self._roi_nx, self._roi_ny, zoom_level=level)
             print(f"Action: Setting Zoom to {level}x")
+            if self.logger is not None:
+                self.logger.log_event(
+                    "zoom_action",
+                    zoom=float(level),
+                    roi_nx=float(self._roi_nx),
+                    roi_ny=float(self._roi_ny),
+                )
         else:
             print(f"Warning: Invalid zoom level {level}. Ignoring.")
 
@@ -201,16 +209,21 @@ class ActionPolicy:
         
         print(f"Action: Setting Exposure to {val}")
         self.camera.set_property(cv2.CAP_PROP_EXPOSURE, val)
+        if self.logger is not None:
+            self.logger.log_event(
+                "exposure_action",
+                exposure_index=idx,
+                exposure_value=float(val),
+            )
 
 
 # --- Independent Test ---
-def main():
+def run_policy_demo(camera_id: int = 1):
     from src.camera import Camera
     
     print("Initializing Camera for Policy Test...")
-    # Use ID 1 (your external cam)
     try:
-        camera = Camera(1)
+        camera = Camera(camera_id)
     except Exception as e:
         print(e)
         return
@@ -276,6 +289,10 @@ def main():
 
     print("Test Finished.")
     camera.release()
+
+
+def main():
+    run_policy_demo()
 
 if __name__ == "__main__":
     main()
