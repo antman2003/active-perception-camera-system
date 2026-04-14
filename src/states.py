@@ -97,26 +97,29 @@ class MonitorState(State):
                 print(f"[!] Lighting Changed! Diff: {diff:.1f} baseline: {context.baseline_brightness:.1f} (Thresh: {dynamic_threshold:.1f})")
 
         # 4. Trigger EXPOSURE EXPLORE with hysteresis + consecutive-frame gating
-        if env_changed and uncertainty >= self.explore_enter_threshold:
-            self._explore_trigger_count += 1
-        elif (not env_changed) or (uncertainty <= self.explore_exit_threshold):
-            self._explore_trigger_count = 0
+        if context.enable_exposure_control and context.policy.exposure_supported:
+            if env_changed and uncertainty >= self.explore_enter_threshold:
+                self._explore_trigger_count += 1
+            elif (not env_changed) or (uncertainty <= self.explore_exit_threshold):
+                self._explore_trigger_count = 0
 
-        if self._explore_trigger_count >= self.explore_trigger_frames:
-            print(f"[!] Triggering EXPLORE (Score: {uncertainty:.2f})")
-            context.baseline_brightness = None
+            if self._explore_trigger_count >= self.explore_trigger_frames:
+                print(f"[!] Triggering EXPLORE (Score: {uncertainty:.2f})")
+                context.baseline_brightness = None
+                self._explore_trigger_count = 0
+                _log_event(
+                    context,
+                    "explore_exposure_triggered",
+                    frame_idx=context.frame_count,
+                    reason="env_changed_and_high_uncertainty",
+                    smooth_u=uncertainty,
+                )
+                return ExploreExposureState()
+        else:
             self._explore_trigger_count = 0
-            _log_event(
-                context,
-                "explore_exposure_triggered",
-                frame_idx=context.frame_count,
-                reason="env_changed_and_high_uncertainty",
-                smooth_u=uncertainty,
-            )
-            return ExploreExposureState()
 
         # 5. Check Target Size Change and Quality
-        if context.frame_count >= context.zoom_ignore_until_frame:
+        if context.enable_zoom_control and context.frame_count >= context.zoom_ignore_until_frame:
             if context.baseline_size is None and context.confirmed_detected:
                 context.baseline_size = size_value
                 print(f"[i] Baseline Size Set: {context.baseline_size:.1f}")
@@ -169,9 +172,11 @@ class MonitorState(State):
                     size_value=size_value,
                 )
                 return ExploreZoomState()
+        else:
+            self._zoom_trigger_count = 0
 
         # 7. Zoomed-in Logic: Nudge Tracking or Sniper Recovery
-        if context.policy.current_zoom_level > 1.0:
+        if context.enable_zoom_control and context.policy.current_zoom_level > 1.0:
             if context.confirmed_lost:
                 self.roi_lost_frames += 1
             elif context.confirmed_detected:
@@ -343,7 +348,7 @@ class ExploreZoomState(State):
             # Calculate the winner
             self._apply_best_zoom(context)
             
-            if context.policy.exposure_supported:
+            if context.enable_exposure_control and context.policy.exposure_supported:
                 print("[!] Triggering EXPLORE (Exposure) after ZOOM selection")
                 return ExploreExposureState()
             else:

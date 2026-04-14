@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from demo import run_full_demo
+from src.benchmark import run_benchmark
 from src.policy import run_policy_demo
 from src.uncertainty import run_uncertainty_demo
 
@@ -14,9 +15,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Active Perception System CLI")
     parser.add_argument(
         "--mode",
-        choices=["full", "uncertainty", "policy"],
+        choices=["full", "uncertainty", "policy", "benchmark"],
         default="full",
-        help="Run mode: full system, uncertainty inspection, or policy test.",
+        help="Run mode: full system, uncertainty inspection, policy test, or benchmark.",
     )
     parser.add_argument(
         "--cam",
@@ -27,7 +28,37 @@ def parse_args(argv=None):
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Enable debug mode. Currently only affects full mode frame logging.",
+        help="Enable debug mode. Affects frame logging in full and benchmark modes.",
+    )
+    parser.add_argument(
+        "--system",
+        choices=["all", "static", "active_exp", "active_full"],
+        default="all",
+        help="Benchmark system variant to run. Only used in benchmark mode.",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=10.0,
+        help="Benchmark duration per run in seconds. Only used in benchmark mode.",
+    )
+    parser.add_argument(
+        "--label",
+        type=str,
+        default=None,
+        help="Optional label to attach to benchmark results.",
+    )
+    parser.add_argument(
+        "--distance-cm",
+        type=float,
+        default=None,
+        help="Optional manual distance annotation for benchmark results.",
+    )
+    parser.add_argument(
+        "--lux",
+        type=float,
+        default=None,
+        help="Optional manual lux annotation for benchmark results.",
     )
     return parser.parse_args(argv)
 
@@ -57,6 +88,16 @@ def main(argv=None):
             if args.debug:
                 print("[i] --debug is ignored in policy mode.")
             run_policy_demo(camera_id=args.cam)
+        elif args.mode == "benchmark":
+            run_benchmark(
+                camera_id=args.cam,
+                duration_s=args.duration,
+                system=args.system,
+                debug=args.debug,
+                label=args.label,
+                distance_cm=args.distance_cm,
+                lux=args.lux,
+            )
     except RuntimeError as e:
         print(f"\n[ERROR] Failed to start system: {e}")
         print(f"        Is camera {args.cam} connected and not used by another program?")

@@ -19,7 +19,14 @@ from src.policy import ActionPolicy
 from src.states import MonitorState
 
 class ActivePerceptionLoop:
-    def __init__(self, camera_id: int = 1, debug: bool = False):
+    def __init__(
+        self,
+        camera_id: int = 1,
+        debug: bool = False,
+        enable_exposure_control: bool = True,
+        enable_zoom_control: bool = True,
+        show_window: bool = True,
+    ):
         print("Initializing System Modules...")
         
         # 1. Hardware
@@ -34,6 +41,9 @@ class ActivePerceptionLoop:
         self.policy = ActionPolicy(self.camera)
         self.blackbox = BlackboxLogger(frame_logging_enabled=debug)
         self.policy.logger = self.blackbox
+        self.enable_exposure_control = enable_exposure_control
+        self.enable_zoom_control = enable_zoom_control
+        self.show_window = show_window
         
         # 4. Context Variables (accessed by states)
         self.current_exposure_idx = 3
@@ -73,6 +83,20 @@ class ActivePerceptionLoop:
         self.confirmed_detected = False
         self.confirmed_lost = True
         self.detection_history = deque(maxlen=30)
+        self.benchmark_stable_window_frames = 10
+        self.runtime_stats = {
+            "frames": 0,
+            "detected_frames": 0,
+            "confirmed_detected_frames": 0,
+            "monitor_frames": 0,
+            "raw_u_sum": 0.0,
+            "smooth_u_sum": 0.0,
+            "size_sum": 0.0,
+            "q_size_sum": 0.0,
+            "q_sharpness_sum": 0.0,
+            "detected_metric_frames": 0,
+            "stable_samples": [],
+        }
         
         # Initialize camera to default
         if self.policy.exposure_supported:
@@ -89,12 +113,16 @@ class ActivePerceptionLoop:
             initial_state=self.current_state.name,
         )
 
-    def run(self):
+    def run(self, duration_s: float = None):
         print("\n=== Active Perception Loop Started ===")
         print("Press 'q' in the window to quit.")
+        start_time = time.time()
         
         try:
             while True:
+                if duration_s is not None and (time.time() - start_time) >= duration_s:
+                    break
+
                 self.frame_count += 1
                 
                 # --- Step 1: Sense ---
@@ -123,6 +151,8 @@ class ActivePerceptionLoop:
                 current_brightness = np.mean(frame)
                 size_value = metrics.get("size_raw", 0.0)
                 detection_rate = sum(self.detection_history) / len(self.detection_history)
+                elapsed_s = time.time() - start_time
+                self._update_runtime_stats(raw_u, smooth_u, metrics, detected, elapsed_s)
 
                 self.blackbox.log_frame(
                     frame_idx=self.frame_count,
@@ -162,11 +192,12 @@ class ActivePerceptionLoop:
                     self.current_state.on_enter(self)
 
                 # --- Step 5: Visualize ---
-                vis_frame = self._draw_hud(frame, smooth_u, metrics, corners, ids)
-                self.camera.display(vis_frame, "Active Perception System")
-                
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                if self.show_window:
+                    vis_frame = self._draw_hud(frame, smooth_u, metrics, corners, ids)
+                    self.camera.display(vis_frame, "Active Perception System")
+                    
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
                     
         finally:
             self.blackbox.log_event(
@@ -176,6 +207,166 @@ class ActivePerceptionLoop:
             )
             self.camera.release()
             print("System Shutdown.")
+
+        return self.build_summary(time.time() - start_time)
+
+    def _update_runtime_stats(self, raw_u, smooth_u, metrics, detected, elapsed_s: float):
+        self.runtime_stats["frames"] += 1
+        self.runtime_stats["raw_u_sum"] += float(raw_u)
+        self.runtime_stats["smooth_u_sum"] += float(smooth_u)
+        if detected:
+            self.runtime_stats["detected_frames"] += 1
+        if self.confirmed_detected:
+            self.runtime_stats["confirmed_detected_frames"] += 1
+        if self.current_state.name == "MONITOR":
+            self.runtime_stats["monitor_frames"] += 1
+        if metrics.get("detected", False):
+            self.runtime_stats["detected_metric_frames"] += 1
+            self.runtime_stats["size_sum"] += float(metrics.get("size_raw", 0.0))
+            self.runtime_stats["q_size_sum"] += float(metrics.get("q_size", 0.0))
+            self.runtime_stats["q_sharpness_sum"] += float(metrics.get("q_sharpness", 0.0))
+
+        is_stable_monitor_frame = (
+            self.current_state.name == "MONITOR"
+            and self.confirmed_detected
+            and self.frame_count >= self.ignore_until_frame
+            and self.frame_count >= self.zoom_ignore_until_frame
+        )
+        if is_stable_monitor_frame:
+            self.runtime_stats["stable_samples"].append(
+                {
+                    "frame_idx": int(self.frame_count),
+                    "elapsed_s": float(elapsed_s),
+                    "raw_u": float(raw_u),
+                    "smooth_u": float(smooth_u),
+                    "q_size": float(metrics.get("q_size", 0.0)),
+                    "q_sharpness": float(metrics.get("q_sharpness", 0.0)),
+                    "size_raw": float(metrics.get("size_raw", 0.0)),
+                    "zoom": float(self.policy.current_zoom_level),
+                    "exposure_idx": int(self.current_exposure_idx),
+                }
+            )
+
+    def build_summary(self, duration_s: float) -> dict:
+        frames = max(1, self.runtime_stats["frames"])
+        detected_metric_frames = max(1, self.runtime_stats["detected_metric_frames"])
+        stable_metrics = self._compute_stable_metrics()
+        return {
+            "duration_s": float(duration_s),
+            "frames": self.runtime_stats["frames"],
+            "detected_rate": self.runtime_stats["detected_frames"] / frames,
+            "confirmed_detected_rate": self.runtime_stats["confirmed_detected_frames"] / frames,
+            "search_frames_ratio": 1.0 - (self.runtime_stats["monitor_frames"] / frames),
+            "avg_raw_uncertainty": self.runtime_stats["raw_u_sum"] / frames,
+            "avg_smooth_uncertainty": self.runtime_stats["smooth_u_sum"] / frames,
+            "avg_size_when_detected": self.runtime_stats["size_sum"] / detected_metric_frames,
+            "avg_q_size_when_detected": self.runtime_stats["q_size_sum"] / detected_metric_frames,
+            "avg_q_sharpness_when_detected": self.runtime_stats["q_sharpness_sum"] / detected_metric_frames,
+            "final_zoom": float(self.policy.current_zoom_level),
+            "final_exposure_idx": int(self.current_exposure_idx),
+            **stable_metrics,
+            "mode_flags": {
+                "enable_exposure_control": self.enable_exposure_control,
+                "enable_zoom_control": self.enable_zoom_control,
+            },
+        }
+
+    def _compute_stable_metrics(self) -> dict:
+        samples = self.runtime_stats["stable_samples"]
+        window = self.benchmark_stable_window_frames
+        if len(samples) < window:
+            return {
+                "stable_window_frames": window,
+                "stable_samples": len(samples),
+                "time_to_stable_s": None,
+                "best_stable_uncertainty": None,
+                "best_stable_smooth_uncertainty": None,
+                "best_stable_q_size": None,
+                "best_stable_q_sharpness": None,
+                "best_stable_size_raw": None,
+                "best_stable_zoom": None,
+                "best_stable_exposure_idx": None,
+                "final_stable_uncertainty": None,
+                "final_stable_smooth_uncertainty": None,
+                "final_stable_q_size": None,
+                "final_stable_q_sharpness": None,
+                "final_stable_size_raw": None,
+                "final_stable_zoom": None,
+                "final_stable_exposure_idx": None,
+            }
+
+        stable_runs = []
+        current_run = [samples[0]]
+        for sample in samples[1:]:
+            if sample["frame_idx"] == current_run[-1]["frame_idx"] + 1:
+                current_run.append(sample)
+            else:
+                stable_runs.append(current_run)
+                current_run = [sample]
+        stable_runs.append(current_run)
+
+        window_summaries = []
+        for run in stable_runs:
+            if len(run) < window:
+                continue
+            for i in range(len(run) - window + 1):
+                chunk = run[i : i + window]
+                window_summaries.append(
+                    {
+                        "elapsed_s": chunk[-1]["elapsed_s"],
+                        "raw_u": float(np.mean([s["raw_u"] for s in chunk])),
+                        "smooth_u": float(np.mean([s["smooth_u"] for s in chunk])),
+                        "q_size": float(np.mean([s["q_size"] for s in chunk])),
+                        "q_sharpness": float(np.mean([s["q_sharpness"] for s in chunk])),
+                        "size_raw": float(np.mean([s["size_raw"] for s in chunk])),
+                        "zoom": float(np.mean([s["zoom"] for s in chunk])),
+                        "exposure_idx": int(round(np.mean([s["exposure_idx"] for s in chunk]))),
+                    }
+                )
+
+        if not window_summaries:
+            return {
+                "stable_window_frames": window,
+                "stable_samples": len(samples),
+                "time_to_stable_s": None,
+                "best_stable_uncertainty": None,
+                "best_stable_smooth_uncertainty": None,
+                "best_stable_q_size": None,
+                "best_stable_q_sharpness": None,
+                "best_stable_size_raw": None,
+                "best_stable_zoom": None,
+                "best_stable_exposure_idx": None,
+                "final_stable_uncertainty": None,
+                "final_stable_smooth_uncertainty": None,
+                "final_stable_q_size": None,
+                "final_stable_q_sharpness": None,
+                "final_stable_size_raw": None,
+                "final_stable_zoom": None,
+                "final_stable_exposure_idx": None,
+            }
+
+        best_window = min(window_summaries, key=lambda item: item["raw_u"])
+        final_window = window_summaries[-1]
+
+        return {
+            "stable_window_frames": window,
+            "stable_samples": len(samples),
+            "time_to_stable_s": window_summaries[0]["elapsed_s"],
+            "best_stable_uncertainty": best_window["raw_u"],
+            "best_stable_smooth_uncertainty": best_window["smooth_u"],
+            "best_stable_q_size": best_window["q_size"],
+            "best_stable_q_sharpness": best_window["q_sharpness"],
+            "best_stable_size_raw": best_window["size_raw"],
+            "best_stable_zoom": best_window["zoom"],
+            "best_stable_exposure_idx": best_window["exposure_idx"],
+            "final_stable_uncertainty": final_window["raw_u"],
+            "final_stable_smooth_uncertainty": final_window["smooth_u"],
+            "final_stable_q_size": final_window["q_size"],
+            "final_stable_q_sharpness": final_window["q_sharpness"],
+            "final_stable_size_raw": final_window["size_raw"],
+            "final_stable_zoom": final_window["zoom"],
+            "final_stable_exposure_idx": final_window["exposure_idx"],
+        }
 
     def _draw_hud(self, frame, uncertainty, metrics, corners, ids):
         """
