@@ -110,7 +110,7 @@ class HardwareController:
 
 def run_servo_demo(
     port: str = "COM3",
-    baudrate: int = 115200,
+    baudrate: int = 115200, #波特率
     pan_limits: Tuple[int, int] = (60, 120),
     tilt_limits: Tuple[int, int] = (60, 120),
 ) -> None:

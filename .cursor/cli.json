@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(**)",
+      "Write(**)"
+    ],
+    "deny": [
+      "Read(D:/**)",
+      "Write(D:/**)",
+      "Read(F:/**)",
+      "Write(F:/**)",
+      "Read(E:/(43)  Tax/**)",
+      "Write(E:/(43)  Tax/**)",
+      "Read(E:/(28)  Important information/**)",
+      "Write(E:/(28)  Important information/**)",
+      "Read(C:/Users/xiexu/Desktop/**)",
+      "Write(C:/Users/xiexu/Desktop/**)",
+      "Read(C:/Users/xiexu/Documents/**)",
+      "Write(C:/Users/xiexu/Documents/**)",
+      "Read(C:/Users/xiexu/Downloads/**)",
+      "Write(C:/Users/xiexu/Downloads/**)",
+      "Read(C:/Users/xiexu/Pictures/**)",
+      "Write(C:/Users/xiexu/Pictures/**)",
+      "Read(C:/Users/xiexu/Videos/**)",
+      "Write(C:/Users/xiexu/Videos/**)",
+      "Read(C:/Users/xiexu/.ssh/**)",
+      "Write(C:/Users/xiexu/.ssh/**)",
+      "Read(C:/Users/xiexu/.aws/**)",
+      "Write(C:/Users/xiexu/.aws/**)",
+      "Read(C:/Users/xiexu/.gnupg/**)",
+      "Write(C:/Users/xiexu/.gnupg/**)"
+    ]
+  }
+}
