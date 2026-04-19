@@ -14,10 +14,10 @@ namespace {
 const int PAN_PIN = 9;
 const int TILT_PIN = 10;
 
-const int PAN_MIN = 60;
-const int PAN_MAX = 120;
-const int TILT_MIN = 60;
-const int TILT_MAX = 120;
+const int PAN_MIN = 0;
+const int PAN_MAX = 180;
+const int TILT_MIN = 50;
+const int TILT_MAX = 130;
 
 const int HOME_PAN = 90;
 const int HOME_TILT = 90;
@@ -51,11 +51,11 @@ void writeHomePose() {
 void runSelfTest() {
   const int poses[][2] = {
     {HOME_PAN, HOME_TILT},
-    {80, HOME_TILT},
-    {100, HOME_TILT},
+    {PAN_MIN, HOME_TILT},
+    {PAN_MAX, HOME_TILT},
     {HOME_PAN, HOME_TILT},
-    {HOME_PAN, 80},
-    {HOME_PAN, 100},
+    {HOME_PAN, TILT_MIN},
+    {HOME_PAN, TILT_MAX},
     {HOME_PAN, HOME_TILT},
   };
 
