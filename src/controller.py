@@ -115,9 +115,11 @@ class HardwareController:
         )
         time.sleep(self.startup_delay_s)
         self._drain_input()
+        self._send_pose(self.home_pose, settle_s=0.5)
 
     def close(self) -> None:
         if self.is_connected:
+            self._send_pose(self.home_pose, settle_s=0.3)
             self.serial_port.close()
         self.serial_port = None
 

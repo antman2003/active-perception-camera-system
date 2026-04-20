@@ -32,11 +32,59 @@ The goal of this project is **system-level perception design**, not maximizing m
 
 ## System Architecture
 
+The system is a **closed sense–decide–act loop**: every frame is scored for perception confidence, and when confidence drops, the policy reaches for a different *action* — exposure, digital zoom, or a physical pan-tilt move — to recover.
+
+### High-Level Loop
+
+```mermaid
+flowchart LR
+    subgraph Sense
+        C[Camera<br/>USB Webcam]
+        P[Perception<br/>ArUco Detector]
+        U[Uncertainty<br/>Score]
+    end
+    subgraph Decide
+        SM[State Machine<br/>+ Policy]
+    end
+    subgraph Act
+        EX[Exposure Control]
+        ZM[Digital Zoom / ROI]
+        PT[Pan-Tilt Servos<br/>via Arduino Serial]
+    end
+    C --> P --> U --> SM
+    SM --> EX
+    SM --> ZM
+    SM --> PT
+    EX -. imaging .-> C
+    ZM -. crop / nudge .-> C
+    PT -. viewpoint .-> C
 ```
-Camera → Perception → Uncertainty Estimation → Action Policy → Pan-Tilt Control
-   ↑                                                               ↓
-   └────────────────────────── Closed Perception Loop ─────────────┘
+
+### State Machine
+
+The active perception loop is implemented as an explicit FSM in `src/states.py`. Each state owns one recovery strategy; transitions are driven by uncertainty and detection history.
+
+```mermaid
+stateDiagram-v2
+    [*] --> MONITOR
+
+    MONITOR --> EXPLORE_EXPOSURE: lighting changed +<br/>high uncertainty
+    MONITOR --> EXPLORE_ZOOM: target size changed /<br/>poor quality at base
+    MONITOR --> SNIPER: zoom > 1x AND<br/>ROI lost for N frames
+    MONITOR --> PHYSICAL_SEARCH: pan-tilt available AND<br/>target lost at zoom=1x
+
+    EXPLORE_EXPOSURE --> MONITOR: best exposure picked
+
+    EXPLORE_ZOOM --> EXPLORE_EXPOSURE: zoom picked +<br/>exposure supported
+    EXPLORE_ZOOM --> MONITOR: zoom picked
+
+    SNIPER --> MONITOR: re-locked at 1.0x
+    SNIPER --> PHYSICAL_SEARCH: timeout
+
+    PHYSICAL_SEARCH --> MONITOR: target re-detected
 ```
+
+> Detailed module/state explanations live in `Implementation_plan.md`. Hardware wiring and Arduino setup live under `hardware/`.
 
 ---
 
@@ -44,12 +92,12 @@ Camera → Perception → Uncertainty Estimation → Action Policy → Pan-Tilt 
 
 ### Core Hardware Components
 
-| Component | Description |
+| Component | Description | Price on Amazon 2026
 |---------|-------------|
-| Camera | Logitech Brio 100 USB Webcam |
-| Pan-Tilt Platform | Yahboom 2-DOF Servo Pan-Tilt Kit |
-| Microcontroller | Arduino Nano / Arduino Uno |
-| Power Supply | External 5V supply (MB102 breadboard module) |
+| Camera | Logitech Brio 100 USB Webcam | 25 dollars
+| Pan-Tilt Platform | Yahboom 2-DOF Servo Pan-Tilt Kit | 50 dollars
+| Microcontroller | Arduino Nano / Arduino Uno | 20 dollars
+| Power Supply | External 5V supply (MB102 breadboard module) | 10 dollars
 | Control Interface | USB Serial (PC ↔ Arduino) |
 
 ### Hardware Design Notes
@@ -127,6 +175,24 @@ This mirrors strategies used in robotics and embodied AI systems.
 - Continuous viewpoint optimization
 - Sensor fusion (IMU, depth)
 - Mobile platforms
+
+---
+
+## Troubleshooting
+
+### Servo moves far beyond expected range after restart
+
+**Symptom**: After restarting the Python program, the pan-tilt stage moves to extreme angles that clearly exceed the configured software limits (`TILT_MIN`/`TILT_MAX`).
+
+**Root Cause**: Position tracking desynchronization between the Python software and the physical servo state. This happens when:
+1. The previous Python session exits without homing the servos (crash, Ctrl+C, terminal closed).
+2. The Arduino stays powered — servos remain at their last commanded position (e.g. tilt=130°).
+3. On the next Python startup, `HardwareController` assumes the stage is at home (90°, 90°), but physically it is elsewhere.
+4. All subsequent relative commands (`nudge`, `move_by`) accumulate on top of this incorrect baseline, causing the stage to exceed its intended range.
+
+**Quick Fix**: Disconnect and reconnect the Arduino USB cable. This power-cycles the Arduino, which runs `setup()` → `writeHomePose()` and physically resets the servos to (90, 90), re-aligning hardware and software state.
+
+**Permanent Fix (already applied)**: The `HardwareController` now sends a home command in both `connect()` and `close()`, and `ActivePerceptionLoop` calls `home(smooth=True)` before closing. This ensures the stage always returns to home on shutdown and re-syncs on startup, eliminating the desync regardless of how the previous session ended.
 
 ---
 
