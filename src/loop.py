@@ -12,6 +12,7 @@ import time
 import numpy as np
 from collections import deque
 from src.camera import Camera
+from src.controller import HardwareController
 from src.logger import BlackboxLogger
 from src.perception import PerceptionSystem
 from src.uncertainty import UncertaintyEngine, TemporalSmoother
@@ -25,12 +26,26 @@ class ActivePerceptionLoop:
         debug: bool = False,
         enable_exposure_control: bool = True,
         enable_zoom_control: bool = True,
+        enable_pan_tilt: bool = False,
+        pan_tilt_port: str = "COM3",
         show_window: bool = True,
     ):
         print("Initializing System Modules...")
         
         # 1. Hardware
         self.camera = Camera(camera_id)
+        
+        self.enable_pan_tilt = enable_pan_tilt
+        self.pan_tilt: HardwareController | None = None
+        if enable_pan_tilt:
+            try:
+                self.pan_tilt = HardwareController(port=pan_tilt_port)
+                self.pan_tilt.connect()
+                print(f"[i] Pan-Tilt stage connected on {pan_tilt_port}")
+            except Exception as e:
+                print(f"[!] Pan-Tilt init failed ({e}). Continuing without physical servoing.")
+                self.pan_tilt = None
+                self.enable_pan_tilt = False
         
         # 2. Perception & Brain
         self.perception = PerceptionSystem()
@@ -68,6 +83,12 @@ class ActivePerceptionLoop:
         self.monitor_zoom_trigger_frames = 2
         self.monitor_roi_lost_threshold = 8
         self.monitor_nudge_gain = 0.15
+        self.pan_tilt_gain_pan = 8.0
+        self.pan_tilt_gain_tilt = 5.0
+        self.pan_tilt_deadzone = 0.05
+        self.pan_tilt_search_lost_threshold = 30
+        self.last_seen_pan = None
+        self.last_seen_tilt = None
         self.sniper_timeout_frames = 60
 
         self.exposure_settle_frames = 2
@@ -205,6 +226,12 @@ class ActivePerceptionLoop:
                 final_state=self.current_state.name,
                 frame_idx=self.frame_count,
             )
+            if self.pan_tilt is not None:
+                try:
+                    self.pan_tilt.home(smooth=True)
+                except Exception:
+                    pass
+                self.pan_tilt.close()
             self.camera.release()
             print("System Shutdown.")
 
@@ -399,6 +426,12 @@ class ActivePerceptionLoop:
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
         cv2.putText(annotated, f"Size: {metrics.get('size_raw', 0):.0f}", (10, 150),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                   
+        # 6. Pan-Tilt pose
+        if self.pan_tilt is not None:
+            pose = self.pan_tilt.current_pose
+            cv2.putText(annotated, f"PT: P{pose.pan} T{pose.tilt}", (10, 170),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 100), 1)
                    
         return annotated
 

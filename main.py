@@ -5,7 +5,7 @@ Unified CLI entry point for the active perception system.
 import argparse
 import sys
 
-from demo import run_full_demo
+from demo import run_full_demo, probe_pan_tilt
 from src.benchmark import run_benchmark
 from src.policy import run_policy_demo
 from src.uncertainty import run_uncertainty_demo
@@ -60,26 +60,55 @@ def parse_args(argv=None):
         default=None,
         help="Optional manual lux annotation for benchmark results.",
     )
+    parser.add_argument(
+        "--no-pan-tilt",
+        action="store_true",
+        help="Force disable pan-tilt stage (skip auto-detection).",
+    )
+    parser.add_argument(
+        "--port",
+        type=str,
+        default="COM3",
+        help="Serial port for the pan-tilt Arduino (default: COM3).",
+    )
     return parser.parse_args(argv)
 
 
-def print_mode_banner(mode: str, cam_id: int, debug: bool):
+def print_mode_banner(mode: str, cam_id: int, debug: bool,
+                      pan_tilt: bool = False, port: str = "COM3"):
     print("=" * 60)
     print("    Active Perception Camera System")
     print("=" * 60)
     print(f"[*] Mode: {mode}")
     print(f"[*] Camera: {cam_id}")
     print(f"[*] Debug: {'ON' if debug else 'OFF'}")
+    print(f"[*] Pan-Tilt: {'ENABLED on ' + port if pan_tilt else 'DISABLED'}")
     print("=" * 60)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    print_mode_banner(args.mode, args.cam, args.debug)
+
+    if args.no_pan_tilt:
+        use_pan_tilt = False
+    else:
+        print(f"[*] Probing pan-tilt stage on {args.port}...")
+        use_pan_tilt = probe_pan_tilt(args.port)
+        if use_pan_tilt:
+            print(f"[*] Pan-tilt stage detected on {args.port}.")
+        else:
+            print(f"[*] No pan-tilt stage found on {args.port}. Running in digital-only mode.")
+
+    print_mode_banner(args.mode, args.cam, args.debug, use_pan_tilt, args.port)
 
     try:
         if args.mode == "full":
-            run_full_demo(camera_id=args.cam, debug=args.debug)
+            run_full_demo(
+                camera_id=args.cam,
+                debug=args.debug,
+                enable_pan_tilt=use_pan_tilt,
+                pan_tilt_port=args.port,
+            )
         elif args.mode == "uncertainty":
             if args.debug:
                 print("[i] --debug is ignored in uncertainty mode.")

@@ -64,6 +64,7 @@ class MonitorState(State):
         self.zoom_trigger_frames = 2
         self._explore_trigger_count = 0
         self._zoom_trigger_count = 0
+        self._pt_lost_frames = 0
 
     def on_enter(self, context):
         self.roi_lost_threshold = context.monitor_roi_lost_threshold
@@ -194,7 +195,7 @@ class MonitorState(State):
                     )
                     return SniperRecoveryState()
                     
-            # Smooth Visual Servoing (Nudge)
+            # Smooth Digital Visual Servoing (Nudge ROI)
             if detected and corners is not None and context.frame_count >= context.ignore_until_frame and context.frame_count >= context.zoom_ignore_until_frame:
                 cent = _aruco_centroid_pixel(corners)
                 if cent is not None:
@@ -202,6 +203,39 @@ class MonitorState(State):
                     hh, ww = frame.shape[:2]
                     tnx, tny = context.policy.marker_center_to_full_norm(mx, my, ww, hh)
                     context.policy.nudge_roi_towards(tnx, tny, gain=context.monitor_nudge_gain)
+
+        # 8. Physical Visual Servoing (Pan-Tilt)
+        if context.enable_pan_tilt and context.pan_tilt is not None:
+            if detected and corners is not None:
+                self._pt_lost_frames = 0
+                pose = context.pan_tilt.current_pose
+                context.last_seen_pan = pose.pan
+                context.last_seen_tilt = pose.tilt
+                cent = _aruco_centroid_pixel(corners)
+                if cent is not None:
+                    mx, my = cent
+                    hh, ww = frame.shape[:2]
+                    err_x = (mx / ww) - 0.5
+                    err_y = (my / hh) - 0.5
+                    deadzone = context.pan_tilt_deadzone
+                    if abs(err_x) > deadzone or abs(err_y) > deadzone:
+                        delta_pan = -err_x * context.pan_tilt_gain_pan
+                        delta_tilt = -err_y * context.pan_tilt_gain_tilt
+                        context.pan_tilt.nudge(delta_pan, delta_tilt, settle_s=0.02)
+            else:
+                self._pt_lost_frames += 1
+
+            # 9. Trigger Physical Search when target lost at base zoom
+            if self._pt_lost_frames >= context.pan_tilt_search_lost_threshold:
+                if context.policy.current_zoom_level <= 1.0:
+                    print(f"[!] Target lost for {self._pt_lost_frames} frames with pan-tilt. Starting Physical Search.")
+                    _log_event(
+                        context,
+                        "physical_search_triggered",
+                        frame_idx=context.frame_count,
+                        reason="lost_at_base_zoom_with_pan_tilt",
+                    )
+                    return PhysicalSearchState()
                     
         return self
 
@@ -468,18 +502,107 @@ class SniperRecoveryState(State):
 
 class PhysicalSearchState(State):
     """
-    Final fallback state when Sniper Recovery times out.
-    Stays passively at 1.0x wide-angle, waiting for user to move the target back.
-    Once target is detected again, goes back to MonitorState (which will likely trigger zoom explore).
+    Two-phase physical search:
+
+    - Phase A (Local): 3x3 grid around the last known target position.
+      Exploits the fact that a just-lost target is most likely very close to
+      where it was seen.
+    - Phase B (Wide): Sparse 5x3 grid covering the full workspace.
+      Steps are sized to roughly match the camera FOV (with overlap), so the
+      entire reachable area is covered in few positions.
+    - Phase C (Wait): If nothing found, park at home and wait passively.
+
+    If no last known position is available (cold start), Phase A is skipped.
     """
+
+    _LOCAL_OFFSETS_PAN = [-15, 0, 15]
+    _LOCAL_OFFSETS_TILT = [-15, 0, 15]
+    _WIDE_OFFSETS_PAN = [-50, -25, 0, 25, 50]
+    _WIDE_OFFSETS_TILT = [-25, 0, 25]
+
+    _LOCAL_FRAMES_PER_POS = 6
+    _LOCAL_SETTLE_S = 0.4
+    _WIDE_FRAMES_PER_POS = 12
+    _WIDE_SETTLE_S = 0.6
+
     def __init__(self):
         super().__init__()
         self.name = "PHYSICAL_SEARCH"
+        self._positions = []
+        self._pos_idx = 0
+        self._frames_at_pos = 0
+        self._done = False
+
+    @staticmethod
+    def _dedupe(positions):
+        """Remove consecutive duplicate positions (compare pan/tilt only)."""
+        result = []
+        for p in positions:
+            if not result or (result[-1][0], result[-1][1]) != (p[0], p[1]):
+                result.append(p)
+        return result
+
+    @staticmethod
+    def _build_grid(center_pan, center_tilt, pan_offsets, tilt_offsets,
+                    pan_limits, tilt_limits, settle_s, frames_per_pos):
+        """Build a zigzag grid of clamped (pan, tilt, settle_s, frames) entries."""
+        pan_min, pan_max = pan_limits
+        tilt_min, tilt_max = tilt_limits
+        positions = []
+        for i, t_off in enumerate(tilt_offsets):
+            row_pans = pan_offsets if i % 2 == 0 else list(reversed(pan_offsets))
+            for p_off in row_pans:
+                p = max(pan_min, min(pan_max, center_pan + p_off))
+                t = max(tilt_min, min(tilt_max, center_tilt + t_off))
+                positions.append((p, t, settle_s, frames_per_pos))
+        return positions
+
+    def on_enter(self, context):
+        if not (context.enable_pan_tilt and context.pan_tilt is not None):
+            return
+
+        pan_limits = context.pan_tilt.pan_limits
+        tilt_limits = context.pan_tilt.tilt_limits
+        home = context.pan_tilt.home_pose
+
+        local_positions = []
+        last_pan = context.last_seen_pan
+        last_tilt = context.last_seen_tilt
+        if last_pan is not None and last_tilt is not None:
+            local_positions = self._build_grid(
+                last_pan, last_tilt,
+                self._LOCAL_OFFSETS_PAN, self._LOCAL_OFFSETS_TILT,
+                pan_limits, tilt_limits,
+                self._LOCAL_SETTLE_S, self._LOCAL_FRAMES_PER_POS,
+            )
+            local_positions = self._dedupe(local_positions)
+            print(f"[i] Physical Search Phase A: {len(local_positions)} local positions "
+                  f"around last known ({last_pan}°, {last_tilt}°).")
+        else:
+            print("[i] Physical Search: no last known position, skipping Phase A.")
+
+        wide_positions = self._build_grid(
+            home.pan, home.tilt,
+            self._WIDE_OFFSETS_PAN, self._WIDE_OFFSETS_TILT,
+            pan_limits, tilt_limits,
+            self._WIDE_SETTLE_S, self._WIDE_FRAMES_PER_POS,
+        )
+        wide_positions = self._dedupe(wide_positions)
+        print(f"[i] Physical Search Phase B: {len(wide_positions)} wide grid positions "
+              f"(dwell {self._WIDE_FRAMES_PER_POS} frames, settle {self._WIDE_SETTLE_S}s).")
+
+        self._positions = local_positions + wide_positions
+        self._pos_idx = 0
+        self._frames_at_pos = 0
+        self._done = False
+
+        if self._positions:
+            pan, tilt, settle_s, _ = self._positions[0]
+            context.pan_tilt.move_to(pan, tilt, smooth=False, settle_s=settle_s)
 
     def update(self, context, frame, detected, corners, ids, smooth_u, raw_u, metrics, current_brightness, size_value):
-        # We are at 1.0x zoom and waiting for target.
         if context.confirmed_detected:
-            print("[i] Target re-entered scene. Resuming normal operations.")
+            print("[i] Target found during Physical Search. Resuming normal operations.")
             _log_event(
                 context,
                 "physical_search_exit",
@@ -489,6 +612,25 @@ class PhysicalSearchState(State):
             context.ignore_until_frame = context.frame_count + 5
             context.zoom_ignore_until_frame = context.frame_count + 5
             return MonitorState()
-            
+
+        if not (context.enable_pan_tilt and context.pan_tilt is not None):
+            return self
+
+        if self._done:
+            return self
+
+        _, _, _, frames_per_pos = self._positions[self._pos_idx]
+        self._frames_at_pos += 1
+        if self._frames_at_pos >= frames_per_pos:
+            self._frames_at_pos = 0
+            self._pos_idx += 1
+            if self._pos_idx >= len(self._positions):
+                print("[i] Physical Search: all positions scanned. Parking at home, waiting passively.")
+                context.pan_tilt.home(smooth=True)
+                self._done = True
+            else:
+                pan, tilt, settle_s, _ = self._positions[self._pos_idx]
+                context.pan_tilt.move_to(pan, tilt, smooth=False, settle_s=settle_s)
+
         return self
 
