@@ -297,7 +297,11 @@ class ExploreExposureState(State):
         min_score = min(self.exploration_results.values())
         candidates = [idx for idx, score in self.exploration_results.items() if abs(score - min_score) < 0.01]
         
-        preferred_exposure_val = -4
+        # Among tied minimum-uncertainty exposures, bias toward a "reasonable" hardware value.
+        # Markers: middle of the list (-4) worked well in tuning.
+        # Faces: bias slightly shorter exposure (more negative OpenCV log scale on this camera)
+        # to reduce skin blow-out, which wrecks Haar/LBPH vs enrollment lighting.
+        preferred_exposure_val = -6.0 if getattr(context, "perception_mode", "aruco") == "face" else -4.0
         best_idx = min(
             candidates, 
             key=lambda idx: (

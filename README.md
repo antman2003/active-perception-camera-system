@@ -173,7 +173,7 @@ active-perception-camera-system/
 │
 ├── src/                        # Core Python modules
 │   ├── camera.py               # USB webcam wrapper
-│   ├── perception.py           # ArUco detector
+│   ├── perception/             # ArUco + face backends (`create_perception`)
 │   ├── uncertainty.py          # Confidence scoring
 │   ├── policy.py               # Exposure / zoom / ROI actions
 │   ├── controller.py           # HardwareController (pan-tilt over serial)
@@ -260,6 +260,28 @@ This mirrors strategies used in robotics and embodied AI systems. See the [State
 **Quick Fix**: Disconnect and reconnect the Arduino USB cable. This power-cycles the Arduino, which runs `setup()` → `writeHomePose()` and physically resets the servos to (90, 90), re-aligning hardware and software state.
 
 **Permanent Fix (already applied)**: The `HardwareController` now sends a home command in both `connect()` and `close()`, and `ActivePerceptionLoop` calls `home(smooth=True)` before closing. This ensures the stage always returns to home on shutdown and re-syncs on startup, eliminating the desync regardless of how the previous session ended.
+
+### Face mode: `module 'cv2' has no attribute 'face'`
+
+**Cause**: The lightweight `opencv-python` wheel does not ship the `cv2.face` submodule (LBPH / Eigen / Fisher recognizers).
+
+**Fix**: Use **only** `opencv-contrib-python` in that environment (do not install both):
+
+```bash
+pip uninstall opencv-python opencv-contrib-python -y
+pip install opencv-contrib-python>=4.8
+python -c "import cv2; assert hasattr(cv2, 'face')"
+```
+
+`requirements.txt` already lists `opencv-contrib-python`; reinstall if you previously had `opencv-python` alone.
+
+### Face mode: exposure sweep makes recognition worse
+
+**Same logic as ArUco**: `ExploreExposureState` / `ExploreZoomState` still minimize **`raw_u`** from `UncertaintyEngine` (sharpness + bbox area + detection). There is **no separate** face-specific exposure math yet—only different **size/sharpness** defaults for faces in `ActivePerceptionLoop`.
+
+**Why blow-out breaks “Aaron Xie”**: LBPH is trained on your saved JPEGs. If the sweep locks a **much brighter** exposure than enrollment, gradients on the face change and the LBPH distance spikes → `?`.
+
+**Mitigations**: (1) capture enrollment under lighting similar to the run; (2) after code update, face mode **ties** toward a **shorter-exposure** bias when picking the sweep winner; (3) for a stable demo, temporarily run with exposure control off if you add a flag later, or avoid entering EXPLORE while tuning.
 
 ---
 

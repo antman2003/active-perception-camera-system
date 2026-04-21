@@ -71,6 +71,24 @@ def parse_args(argv=None):
         default="COM3",
         help="Serial port for the pan-tilt Arduino (default: COM3).",
     )
+    parser.add_argument(
+        "--perception",
+        choices=["aruco", "face"],
+        default="aruco",
+        help="Detection backend for full mode (default: aruco).",
+    )
+    parser.add_argument(
+        "--face-registry",
+        type=str,
+        default=None,
+        help="Enrolled faces root folder (required when --perception face).",
+    )
+    parser.add_argument(
+        "--face-threshold",
+        type=float,
+        default=85.0,
+        help="LBPH distance threshold for face ID (default: 85).",
+    )
     return parser.parse_args(argv)
 
 
@@ -103,11 +121,17 @@ def main(argv=None):
 
     try:
         if args.mode == "full":
+            if args.perception == "face" and not args.face_registry:
+                print("[ERROR] --perception face requires --face-registry <folder>")
+                sys.exit(1)
             run_full_demo(
                 camera_id=args.cam,
                 debug=args.debug,
                 enable_pan_tilt=use_pan_tilt,
                 pan_tilt_port=args.port,
+                perception_mode=args.perception,
+                face_registry_dir=args.face_registry,
+                face_match_threshold=args.face_threshold,
             )
         elif args.mode == "uncertainty":
             if args.debug:

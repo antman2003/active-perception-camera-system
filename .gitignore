@@ -16,3 +16,10 @@ tools/
 
 # Local-only: social drafts, copied logs, exports (not for the repo)
 publication/
+
+# Face enrollment images (keep e.g. face_registry/README.txt only)
+face_registry/**/*.jpg
+face_registry/**/*.jpeg
+face_registry/**/*.png
+face_registry/**/*.bmp
+face_registry/**/*.webp

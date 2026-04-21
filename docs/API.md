@@ -4,6 +4,7 @@ This document describes the **public** surface of the project — the things you
 
 - [Command-line interface](#command-line-interface)
 - [`ActivePerceptionLoop`](#activeperceptionloop)
+- [Perception backends (`src/perception/`)](#perception-backends-srcperception)
 - [`HardwareController`](#hardwarecontroller)
 - [Arduino serial protocol](#arduino-serial-protocol)
 
@@ -24,6 +25,7 @@ Both auto-detect a pan-tilt stage by briefly opening the serial port on startup.
 python main.py [--mode {full,uncertainty,policy,benchmark}]
                [--cam INT] [--debug]
                [--port STR] [--no-pan-tilt]
+               [--perception {aruco,face}] [--face-registry DIR] [--face-threshold FLOAT]
                [--system {all,static,active_exp,active_full}]
                [--duration FLOAT] [--label STR]
                [--distance-cm FLOAT] [--lux FLOAT]
@@ -41,6 +43,9 @@ python main.py [--mode {full,uncertainty,policy,benchmark}]
 | `--label`        | —       | benchmark     | Free-form tag saved with the result.                                    |
 | `--distance-cm`  | —       | benchmark     | Manual distance annotation.                                             |
 | `--lux`          | —       | benchmark     | Manual illuminance annotation.                                          |
+| `--perception`   | `aruco` | full          | `aruco` = markers; `face` = registry + LBPH (needs `--face-registry`).   |
+| `--face-registry` | —     | full          | Root folder: one subfolder per person with face images (see `face_registry/README.txt`). |
+| `--face-threshold` | `85.0` | full       | LBPH **distance** cutoff; **lower distance = better match**; above → HUD shows `?`. |
 
 Press **`q`** in the video window to exit. The stage auto-homes on shutdown.
 
@@ -48,6 +53,7 @@ Press **`q`** in the video window to exit. The stage auto-homes on shutdown.
 
 ```
 python demo.py [--cam INT] [--debug] [--port STR] [--no-pan-tilt]
+               [--perception {aruco,face}] [--face-registry DIR] [--face-threshold FLOAT]
 ```
 
 Same camera / debug / pan-tilt semantics as `main.py --mode full`.
@@ -86,6 +92,9 @@ app.run()
 | `enable_pan_tilt`         | `bool` | `False`  | If `True`, tries to open the serial port and enables physical servoing + physical search. |
 | `pan_tilt_port`           | `str`  | `"COM3"` | Serial port name for the Arduino.                                                          |
 | `show_window`             | `bool` | `True`   | If `False`, runs headless (no `cv2.imshow`).                                               |
+| `perception_mode`         | `str`  | `"aruco"` | `"aruco"` or `"face"`.                                                                      |
+| `face_registry_dir`       | `str \| None` | `None` | Required when `perception_mode=="face"`.                                                    |
+| `face_match_threshold`    | `float` | `85.0` | LBPH distance threshold (lower is better).                                                |
 
 If `enable_pan_tilt=True` but the port cannot be opened, the loop prints a warning and continues in digital-only mode — it never raises.
 
@@ -116,6 +125,23 @@ Set these after construction, before `run()`, to tweak behavior without editing 
 ### Methods
 
 - `run()` — blocks until the user presses `q` or the camera closes. Handles graceful shutdown: homes the pan-tilt (if any), closes the serial port, releases the camera.
+
+---
+
+## Perception backends (`src/perception/`)
+
+Session 25 layout: **one `detect` / `visualize` contract** for the loop; ArUco and face both emit ArUco-shaped `corners` for `UncertaintyEngine` / states.
+
+| Symbol | Role |
+| ------ | ---- |
+| `PerceptionDetector` | ABC: `detect`, `visualize`. |
+| `ArucoDetector` | Marker detection (default). Alias export: `PerceptionSystem`. |
+| `FaceDetector` | Haar frontal face + LBPH; largest face = primary target; HUD shows name or `?`. |
+| `create_perception(mode, face_registry_dir=..., face_match_threshold=...)` | Factory used by `ActivePerceptionLoop`. |
+
+Smoke test (ArUco only): `python -m src.perception` (opens camera index `1`).
+
+**Dependency:** face mode needs `opencv-contrib-python` (provides `cv2.face`).
 
 ---
 

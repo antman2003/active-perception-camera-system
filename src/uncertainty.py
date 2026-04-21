@@ -171,7 +171,7 @@ class TemporalSmoother:
 # --- Independent Test ---
 def run_uncertainty_demo(camera_id: int = 1):
     from src.camera import Camera
-    from src.perception import PerceptionSystem
+    from src.perception import PerceptionSystem  # ArucoDetector alias
 
     print("Initializing modules...")
     camera = Camera(camera_id)

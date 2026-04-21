@@ -14,7 +14,7 @@ from collections import deque
 from src.camera import Camera
 from src.controller import HardwareController
 from src.logger import BlackboxLogger
-from src.perception import PerceptionSystem
+from src.perception import create_perception
 from src.uncertainty import UncertaintyEngine, TemporalSmoother
 from src.policy import ActionPolicy
 from src.states import MonitorState
@@ -29,6 +29,9 @@ class ActivePerceptionLoop:
         enable_pan_tilt: bool = False,
         pan_tilt_port: str = "COM3",
         show_window: bool = True,
+        perception_mode: str = "aruco",
+        face_registry_dir: str | None = None,
+        face_match_threshold: float = 85.0,
     ):
         print("Initializing System Modules...")
         
@@ -48,8 +51,26 @@ class ActivePerceptionLoop:
                 self.enable_pan_tilt = False
         
         # 2. Perception & Brain
-        self.perception = PerceptionSystem()
-        self.uncertainty_engine = UncertaintyEngine()
+        self.perception_mode = (perception_mode or "aruco").lower().strip()
+        if self.perception_mode == "face":
+            if not face_registry_dir:
+                raise ValueError("perception_mode='face' requires face_registry_dir")
+            # Face bbox + skin highlights: slightly wider sharpness band than marker defaults.
+            self.uncertainty_engine = UncertaintyEngine(
+                sharpness_low=15.0,
+                sharpness_high=650.0,
+                size_low=2500.0,
+                size_high=120000.0,
+            )
+        elif self.perception_mode == "aruco":
+            self.uncertainty_engine = UncertaintyEngine()
+        else:
+            raise ValueError("perception_mode must be 'aruco' or 'face'")
+        self.perception = create_perception(
+            self.perception_mode,
+            face_registry_dir=face_registry_dir,
+            face_match_threshold=face_match_threshold,
+        )
         self.smoother = TemporalSmoother(window_size=5)
         
         # 3. Action
@@ -408,7 +429,7 @@ class ActivePerceptionLoop:
         
         cv2.putText(annotated, f"MODE: {self.current_state.name}", (220, 30), 
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-        
+
         # 3. Uncertainty Bar
         bar_len = int(uncertainty * 200)
         u_color = (0, 0, 255) if uncertainty > 0.6 else (0, 255, 0)

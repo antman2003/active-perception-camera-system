@@ -9,9 +9,41 @@ Core Responsibilities:
 2. Action (set_property): Modify physical imaging parameters (Active Perception).
 """
 
-import cv2
+import sys
 import time
-from typing import Tuple, Optional
+from typing import List, Tuple, Optional
+
+import cv2
+
+
+def open_videocapture(camera_id: int) -> cv2.VideoCapture:
+    """
+    Open a camera index with a backend that works on the user's OS.
+
+    On Windows, the default backend often fails for USB webcams while the
+    built-in laptop cam works; try DirectShow then Media Foundation, then any.
+    """
+    if sys.platform == "win32":
+        for api in (cv2.CAP_DSHOW, cv2.CAP_MSMF):
+            cap = cv2.VideoCapture(camera_id, api)
+            if cap.isOpened():
+                return cap
+            cap.release()
+    return cv2.VideoCapture(camera_id)
+
+
+def probe_camera_indices(last_index: int = 9) -> List[int]:
+    """Return indices in ``0..last_index`` that open and return at least one frame."""
+    good: List[int] = []
+    for i in range(last_index + 1):
+        cap = open_videocapture(i)
+        if not cap.isOpened():
+            continue
+        ok, frame = cap.read()
+        cap.release()
+        if ok and frame is not None:
+            good.append(i)
+    return good
 
 
 class Camera:
@@ -34,9 +66,8 @@ class Camera:
         Raises:
             RuntimeError: If hardware cannot be accessed (Fail Fast).
         """
-        # Connect to hardware
-        # On Windows, cv2.CAP_DSHOW makes startup much faster (DirectShow)
-        self.cap = cv2.VideoCapture(camera_id, cv2.CAP_DSHOW)
+        # Connect to hardware (Windows: prefer DSHOW / MSMF for USB cams)
+        self.cap = open_videocapture(camera_id)
         
         # Critical Check: Validate hardware connection immediately.
         # Don't wait until runtime read() calls to fail.
