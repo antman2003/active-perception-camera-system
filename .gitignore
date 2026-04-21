@@ -10,3 +10,9 @@ venv/
 
 # Runtime artifacts
 logs/
+
+# Platform-specific utilities (not part of the project)
+tools/
+
+# Local-only: social drafts, copied logs, exports (not for the repo)
+publication/

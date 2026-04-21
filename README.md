@@ -3,10 +3,10 @@
 A camera-based **active perception system** that dynamically adjusts its sensing viewpoint based on perception uncertainty, closing the loop between sensing, decision-making, and physical action.
 
 ---
-Activate the venv (.\venv\Scripts\Activate.ps1).
+
 ## Overview
 
-Traditional computer vision systems operate on static, single-frame inputs.In contrast, **active perception** treats sensing as a decision-making process:  when perception confidence is low, the system actively changes *how* it senses the environment.
+Traditional computer vision systems operate on static, single-frame inputs. In contrast, **active perception** treats sensing as a decision-making process: when perception confidence is low, the system actively changes *how* it senses the environment.
 
 This project implements a **hardware-in-the-loop active perception pipeline** using a movable pan-tilt camera. The system continuously evaluates visual confidence and adapts its camera viewpoint to improve perception robustness under challenging real-world conditions such as:
 
@@ -92,20 +92,63 @@ stateDiagram-v2
 
 ### Core Hardware Components
 
-| Component | Description | Price on Amazon 2026
-|---------|-------------|
-| Camera | Logitech Brio 100 USB Webcam | 25 dollars
-| Pan-Tilt Platform | Yahboom 2-DOF Servo Pan-Tilt Kit | 50 dollars
-| Microcontroller | Arduino Nano / Arduino Uno | 20 dollars
-| Power Supply | External 5V supply (MB102 breadboard module) | 10 dollars
-| Control Interface | USB Serial (PC ↔ Arduino) |
+| Component          | Description                                   | Price (USD, Amazon 2026) |
+| ------------------ | --------------------------------------------- | ------------------------ |
+| Camera             | Logitech Brio 100 USB Webcam                  | ~$25                     |
+| Pan-Tilt Platform  | Yahboom 2-DOF Servo Pan-Tilt Kit              | ~$50                     |
+| Microcontroller    | Arduino Nano / Arduino Uno                    | ~$20                     |
+| Power Supply       | External 5V supply (MB102 breadboard module)  | ~$10                     |
+| Control Interface  | USB Serial (PC ↔ Arduino)                     | —                        |
+
+**Total**: ~$105. The whole system runs on an off-the-shelf laptop + hobby-grade servos — no special compute or industrial actuators required.
 
 ### Hardware Design Notes
 
 - The camera is mounted on a 2-DOF pan-tilt platform to enable physical viewpoint changes.
-- Servo motors are powered by an external 5V supply to ensure stability.
+- Servo motors are powered by an external 5V supply to ensure stability under load.
 - Arduino handles low-level motor control; perception and policy logic run on the PC.
 - Mounting prioritizes stability and modularity over mechanical precision.
+
+Full assembly, wiring, firmware flashing and calibration instructions: **[`hardware/README.md`](hardware/README.md)**.
+
+---
+
+## Quick Start
+
+### 1. Install
+
+```powershell
+# Windows PowerShell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+### 2. Flash the Arduino (optional — only if using the pan-tilt)
+
+Open `hardware/arduino/pan_tilt_serial/pan_tilt_serial.ino` in the Arduino IDE and upload to your board. Full wiring and bring-up steps are in [`hardware/README.md`](hardware/README.md).
+
+### 3. Run
+
+```powershell
+# Full system — auto-detects the pan-tilt on COM3; falls back to digital-only if not found
+python main.py
+
+# Different camera or serial port
+python main.py --cam 0 --port COM4
+
+# Disable pan-tilt even if connected
+python main.py --no-pan-tilt
+
+# Debug mode (per-frame blackbox logging into logs/blackbox/)
+python main.py --debug
+
+# Other modes (uncertainty inspection, policy demo, benchmark)
+python main.py --mode uncertainty
+python main.py --mode benchmark --duration 30
+```
+
+Press `q` in the video window to exit; the stage will auto-home on shutdown.
 
 ---
 
@@ -113,34 +156,52 @@ stateDiagram-v2
 
 ### Software Stack
 
-- **Language**: Python (PC), Arduino C++
-- **Vision**: OpenCV
+- **Language**: Python 3.10+ (PC), Arduino C++ (firmware)
+- **Vision**: OpenCV (ArUco detection)
 - **Communication**: pySerial
-- **OS**: Windows 10
+- **OS**: Developed on Windows 10/11; Linux/macOS should work with the correct serial device name
 
 ### Repository Structure
 
 ```
 active-perception-camera-system/
-├── README.md
+├── README.md                   # This file
+├── Implementation_plan.md      # 5-week build log + design notes
+├── main.py                     # Unified CLI entry (full/uncertainty/policy/benchmark)
+├── demo.py                     # Thin demo entry (full system only)
+├── requirements.txt
+│
+├── src/                        # Core Python modules
+│   ├── camera.py               # USB webcam wrapper
+│   ├── perception.py           # ArUco detector
+│   ├── uncertainty.py          # Confidence scoring
+│   ├── policy.py               # Exposure / zoom / ROI actions
+│   ├── controller.py           # HardwareController (pan-tilt over serial)
+│   ├── states.py               # Finite state machine (Monitor / Explore / Sniper / Search)
+│   ├── loop.py                 # ActivePerceptionLoop — main orchestrator
+│   ├── logger.py               # Blackbox event + screenshot logging
+│   ├── benchmark.py            # Baseline vs active comparisons
+│   └── __init__.py
+│
 ├── hardware/
+│   ├── README.md               # Hardware build guide (start here for the physical side)
 │   ├── wiring_diagram.md
-│   └── pan_tilt_setup.md
-├── src/
-│   ├── camera.py
-│   ├── perception.py
-│   ├── uncertainty.py
-│   ├── policy.py
-│   ├── controller.py
-│   └── main_loop.py
-├── experiments/
-│   ├── low_light_test.md
-│   ├── blur_test.md
-│   └── viewpoint_comparison.md
-├── logs/
-└── requirements.txt
-
+│   ├── pan_tilt_setup.md
+│   └── arduino/
+│       └── pan_tilt_serial/
+│           └── pan_tilt_serial.ino   # Servo firmware (PAN/TILT over serial)
+│
+├── docs/
+│   └── API.md                  # CLI, HardwareController, ActivePerceptionLoop, serial protocol
+│
+├── scripts/
+│   └── make_gif.py             # Blink GIF / side-by-side from HUD screenshots (social posts)
+│
+└── logs/                       # Runtime outputs (gitignored)
+    └── blackbox/<timestamp>/   # events.jsonl + screenshots per run
 ```
+
+CLI flags, `HardwareController` methods, `ActivePerceptionLoop` parameters, and the Arduino serial protocol are documented in **[`docs/API.md`](docs/API.md)**.
 
 ---
 
@@ -150,13 +211,13 @@ Instead of relying on lens autofocus or static inference, the system treats **vi
 
 Typical loop:
 
-1. Capture frame  
-2. Run perception  
-3. Estimate uncertainty  
-4. Adjust viewpoint if confidence is low  
-5. Re-evaluate perception  
+1. Capture frame
+2. Run perception
+3. Estimate uncertainty
+4. Pick an action (adjust exposure / zoom / physical viewpoint) if confidence is low
+5. Re-evaluate perception
 
-This mirrors strategies used in robotics and embodied AI systems.
+This mirrors strategies used in robotics and embodied AI systems. See the [State Machine](#state-machine) diagram above for the actual transitions.
 
 ---
 
@@ -168,13 +229,19 @@ This mirrors strategies used in robotics and embodied AI systems.
 
 ---
 
-## Future Work
+## Next Steps
+
+**In progress**
+
+- [ ] Face and hand detection / recognition (MediaPipe or lightweight ONNX models) — replace ArUco as the target, while keeping the same uncertainty-driven FSM.
+
+**Longer horizon**
 
 - Multi-view fusion
-- Learned action policies
+- Learned action policies (RL for action selection)
 - Continuous viewpoint optimization
 - Sensor fusion (IMU, depth)
-- Mobile platforms
+- Mobile platforms (mount on a wheeled base)
 
 ---
 
