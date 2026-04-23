@@ -38,7 +38,7 @@ class ArucoDetector(PerceptionDetector):
         cv2.putText(
             annotated_frame,
             f"Total Markers: {total_count}",
-            (10, 30),
+            (10, 28),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             (0, 255, 255),

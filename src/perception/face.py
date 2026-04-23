@@ -52,6 +52,7 @@ class FaceDetector(PerceptionDetector):
         min_face_size: Tuple[int, int] = (80, 80),
         scale_factor: float = 1.08,
         min_neighbors: int = 5,
+        primary_hysteresis_frames: int = 0,
     ):
         root = Path(registry_root).expanduser().resolve()
         if not root.is_dir():
@@ -62,6 +63,9 @@ class FaceDetector(PerceptionDetector):
         self.min_face_size = min_face_size
         self.scale_factor = scale_factor
         self.min_neighbors = min_neighbors
+        self.primary_hysteresis_frames = max(0, int(primary_hysteresis_frames))
+        self._hyst_lock: Optional[Tuple[int, int, int, int, str, float, int]] = None
+        self._hyst_alt_streak = 0
 
         cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         self._cascade = cv2.CascadeClassifier(cascade_path)
@@ -166,7 +170,34 @@ class FaceDetector(PerceptionDetector):
             scored.append((x, y, w, h, name, dist, label))
 
         self._viz_faces = [(t[0], t[1], t[2], t[3], t[4], t[5]) for t in scored]
+
         primary = max(scored, key=lambda t: t[2] * t[3])
+        if self.primary_hysteresis_frames > 0 and len(scored) >= 2:
+            by_area = sorted(scored, key=lambda t: t[2] * t[3], reverse=True)
+            p0, p1 = by_area[0], by_area[1]
+            a0 = float(p0[2] * p0[3])
+            a1 = float(p1[2] * p1[3])
+            if a0 > 1e-6 and a1 >= 0.88 * a0 and p0[6] != p1[6]:
+                if self._hyst_lock is None:
+                    self._hyst_lock = p0
+                    self._hyst_alt_streak = 0
+                elif p0[6] == self._hyst_lock[6]:
+                    self._hyst_lock = p0
+                    self._hyst_alt_streak = 0
+                else:
+                    self._hyst_alt_streak += 1
+                    if self._hyst_alt_streak >= self.primary_hysteresis_frames:
+                        self._hyst_lock = p0
+                        self._hyst_alt_streak = 0
+                    else:
+                        primary = self._hyst_lock
+            else:
+                self._hyst_lock = p0
+                self._hyst_alt_streak = 0
+        elif self.primary_hysteresis_frames > 0:
+            self._hyst_lock = primary
+            self._hyst_alt_streak = 0
+
         px, py, pw, ph, pname, pdist, plabel = primary
         self.primary_display_name = pname
         self.primary_confidence = pdist
@@ -193,7 +224,7 @@ class FaceDetector(PerceptionDetector):
             cv2.putText(
                 out,
                 f"Faces: {n}",
-                (10, 30),
+                (10, 28),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
                 (0, 255, 255),

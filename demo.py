@@ -9,6 +9,7 @@ without modifying the core logic files.
 import argparse
 import sys
 import serial
+from src.face_registry_resolve import resolve_face_registry_dir
 from src.loop import ActivePerceptionLoop
 
 def parse_args(argv=None):
@@ -37,21 +38,46 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--perception",
-        choices=["aruco", "face"],
-        default="aruco",
-        help="Detection backend: ArUco marker or enrolled faces (default: aruco).",
+        choices=["aruco", "face", "mixed", "auto"],
+        default="mixed",
+        help="mixed (default) | auto (=mixed) | aruco | face.",
+    )
+    parser.add_argument(
+        "--mixed-policy",
+        choices=["aruco_first", "face_first", "larger_area"],
+        default="aruco_first",
+        help="When --perception mixed|auto: which target drives tracking (default: aruco_first).",
     )
     parser.add_argument(
         "--face-registry",
         type=str,
         default=None,
-        help="Root folder of enrolled faces (one subfolder per person). Required for --perception face.",
+        help="Root folder of enrolled faces (one subfolder per person). "
+        "Omitted → use ./face_registry under the repo root (must exist).",
     )
     parser.add_argument(
         "--face-threshold",
         type=float,
         default=85.0,
         help="LBPH match threshold (lower distance = more confident; default 85).",
+    )
+    parser.add_argument(
+        "--no-auto-exposure",
+        action="store_true",
+        help="Disable automatic exposure sweeps (compare fixed exposure vs Session 26 face tuning).",
+    )
+    parser.add_argument(
+        "--face-primary-hysteresis",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Face mode: when two enrolled faces are similar size, switch primary only after N frames (0=off).",
+    )
+    parser.add_argument(
+        "--gesture-actions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Session 27b: MediaPipe hand gestures (default: on). Disable with --no-gesture-actions.",
     )
     return parser.parse_args(argv)
 
@@ -66,14 +92,26 @@ def probe_pan_tilt(port: str) -> bool:
         return False
 
 
-def print_welcome_message(cam_id, debug, pan_tilt, port, perception: str, face_registry):
+def print_welcome_message(
+    cam_id,
+    debug,
+    pan_tilt,
+    port,
+    perception: str,
+    face_registry,
+    enable_exposure_control: bool = True,
+    mixed_policy: str | None = None,
+):
     print("="*60)
     print("    Active Perception Camera System")
     print("="*60)
     print(f"[*] Camera: {cam_id}")
     print(f"[*] Perception: {perception.upper()}")
-    if perception == "face":
+    if perception in ("face", "mixed"):
         print(f"[*] Face registry: {face_registry}")
+    if perception == "mixed" and mixed_policy:
+        print(f"[*] Mixed policy: {mixed_policy}")
+    print(f"[*] Auto exposure sweeps: {'ON' if enable_exposure_control else 'OFF'}")
     print(f"[*] Debug mode: {'ON' if debug else 'OFF'}")
     if pan_tilt:
         print(f"[*] Pan-Tilt: ENABLED on {port}")
@@ -81,6 +119,8 @@ def print_welcome_message(cam_id, debug, pan_tilt, port, perception: str, face_r
         print("[*] Pan-Tilt: DISABLED")
     if perception == "aruco":
         print("[*] Make sure you have a 6x6 ArUco Marker ready.")
+    elif perception == "mixed":
+        print("[*] Mixed mode: ArUco + face; HUD shows both; ACTIVE picks the tracker.")
     else:
         print("[*] Face mode: show enrolled people to the camera.")
     print("[*] Features Active:")
@@ -103,18 +143,42 @@ def run_full_demo(
     perception_mode: str = "aruco",
     face_registry_dir: str | None = None,
     face_match_threshold: float = 85.0,
+    enable_exposure_control: bool = True,
+    primary_hysteresis_frames: int = 0,
+    mixed_policy: str = "aruco_first",
+    enable_gesture_actions: bool = True,
 ):
+    pm = (perception_mode or "aruco").lower().strip()
+    if pm == "auto":
+        pm = "mixed"
+    perception_mode = pm
+    resolved_fr = face_registry_dir or ""
+    if perception_mode in ("face", "mixed"):
+        resolved_fr = resolve_face_registry_dir(face_registry_dir)
     print_welcome_message(
-        camera_id, debug, enable_pan_tilt, pan_tilt_port, perception_mode, face_registry_dir
+        camera_id,
+        debug,
+        enable_pan_tilt,
+        pan_tilt_port,
+        perception_mode,
+        resolved_fr or "",
+        enable_exposure_control=enable_exposure_control,
+        mixed_policy=mixed_policy if perception_mode == "mixed" else None,
     )
     app = ActivePerceptionLoop(
         camera_id=camera_id,
         debug=debug,
+        enable_exposure_control=enable_exposure_control,
         enable_pan_tilt=enable_pan_tilt,
         pan_tilt_port=pan_tilt_port,
         perception_mode=perception_mode,
-        face_registry_dir=face_registry_dir,
+        face_registry_dir=(
+            resolved_fr if perception_mode in ("face", "mixed") else face_registry_dir
+        ),
         face_match_threshold=face_match_threshold,
+        primary_hysteresis_frames=primary_hysteresis_frames,
+        mixed_policy=mixed_policy,
+        enable_gesture_actions=enable_gesture_actions,
     )
     app.run()
 
@@ -131,10 +195,6 @@ def main(argv=None):
         else:
             print(f"[*] No pan-tilt stage found on {args.port}. Running in digital-only mode.")
 
-    if args.perception == "face" and not args.face_registry:
-        print("[ERROR] --perception face requires --face-registry <folder>")
-        sys.exit(1)
-
     try:
         run_full_demo(
             camera_id=args.cam,
@@ -144,6 +204,10 @@ def main(argv=None):
             perception_mode=args.perception,
             face_registry_dir=args.face_registry,
             face_match_threshold=args.face_threshold,
+            enable_exposure_control=not args.no_auto_exposure,
+            primary_hysteresis_frames=args.face_primary_hysteresis,
+            mixed_policy=args.mixed_policy,
+            enable_gesture_actions=args.gesture_actions,
         )
     except RuntimeError as e:
         print(f"\n[ERROR] Failed to start system: {e}")

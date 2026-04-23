@@ -131,8 +131,12 @@ Open `hardware/arduino/pan_tilt_serial/pan_tilt_serial.ino` in the Arduino IDE a
 ### 3. Run
 
 ```powershell
-# Full system — auto-detects the pan-tilt on COM3; falls back to digital-only if not found
+# Full system — default perception is mixed (ArUco + face, see --mixed-policy); face registry defaults to ./face_registry
 python main.py
+
+# Marker-only or face-only
+python main.py --perception aruco
+python main.py --perception face
 
 # Different camera or serial port
 python main.py --cam 0 --port COM4

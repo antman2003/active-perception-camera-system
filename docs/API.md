@@ -25,7 +25,9 @@ Both auto-detect a pan-tilt stage by briefly opening the serial port on startup.
 python main.py [--mode {full,uncertainty,policy,benchmark}]
                [--cam INT] [--debug]
                [--port STR] [--no-pan-tilt]
-               [--perception {aruco,face}] [--face-registry DIR] [--face-threshold FLOAT]
+               [--perception {aruco,face,mixed,auto}] [--face-registry DIR] [--face-threshold FLOAT]
+               [--mixed-policy {aruco_first,face_first,larger_area}]
+               [--no-auto-exposure] [--face-primary-hysteresis N]
                [--system {all,static,active_exp,active_full}]
                [--duration FLOAT] [--label STR]
                [--distance-cm FLOAT] [--lux FLOAT]
@@ -43,9 +45,12 @@ python main.py [--mode {full,uncertainty,policy,benchmark}]
 | `--label`        | —       | benchmark     | Free-form tag saved with the result.                                    |
 | `--distance-cm`  | —       | benchmark     | Manual distance annotation.                                             |
 | `--lux`          | —       | benchmark     | Manual illuminance annotation.                                          |
-| `--perception`   | `aruco` | full          | `aruco` = markers; `face` = registry + LBPH (needs `--face-registry`).   |
-| `--face-registry` | —     | full          | Root folder: one subfolder per person with face images (see `face_registry/README.txt`). |
+| `--perception`   | `mixed` | full          | Default **`mixed`**: ArUco + face each frame, one **active** target (see `--mixed-policy`). Also `aruco`, `face`, `auto` (=mixed). |
+| `--mixed-policy` | `aruco_first` | full   | With `mixed`/`auto`: `aruco_first`, `face_first`, or `larger_area` (compare primary contour areas). |
+| `--face-registry` | (default) | full   | Root folder: one subfolder per person with face images (see `face_registry/README.txt`). **Omitted** in `face`/`mixed`/`auto` → `<repo>/face_registry` (must exist). |
 | `--face-threshold` | `85.0` | full       | LBPH **distance** cutoff; **lower distance = better match**; above → HUD shows `?`. |
+| `--no-auto-exposure` | off | full      | Skips `ExploreExposureState` (fixed exposure index from startup). Useful to compare LBPH stability against auto face-tuned sweeps. |
+| `--face-primary-hysteresis` | `0` | full | Face mode only: when **two** faces are similar size (≥88% area ratio) and different identities, require **N** consecutive frames before switching the locked primary. `0` disables. |
 
 Press **`q`** in the video window to exit. The stage auto-homes on shutdown.
 
@@ -53,7 +58,9 @@ Press **`q`** in the video window to exit. The stage auto-homes on shutdown.
 
 ```
 python demo.py [--cam INT] [--debug] [--port STR] [--no-pan-tilt]
-               [--perception {aruco,face}] [--face-registry DIR] [--face-threshold FLOAT]
+               [--perception {aruco,face,mixed,auto}] [--face-registry DIR] [--face-threshold FLOAT]
+               [--mixed-policy {aruco_first,face_first,larger_area}]
+               [--no-auto-exposure] [--face-primary-hysteresis N]
 ```
 
 Same camera / debug / pan-tilt semantics as `main.py --mode full`.
@@ -92,11 +99,30 @@ app.run()
 | `enable_pan_tilt`         | `bool` | `False`  | If `True`, tries to open the serial port and enables physical servoing + physical search. |
 | `pan_tilt_port`           | `str`  | `"COM3"` | Serial port name for the Arduino.                                                          |
 | `show_window`             | `bool` | `True`   | If `False`, runs headless (no `cv2.imshow`).                                               |
-| `perception_mode`         | `str`  | `"aruco"` | `"aruco"` or `"face"`.                                                                      |
-| `face_registry_dir`       | `str \| None` | `None` | Required when `perception_mode=="face"`.                                                    |
+| `perception_mode`         | `str`  | `"aruco"` | Constructor default remains `"aruco"`; CLI `main.py` / `demo.py` default **`mixed`**. Values: `aruco`, `face`, `mixed`, `auto`. |
+| `mixed_policy`            | `str`  | `"aruco_first"` | Only `mixed`/`auto`: priority for the active tracking target. |
+| `face_registry_dir`       | `str \| None` | `None` | For `face` / `mixed` / `auto`, `None`/empty → `<repo>/face_registry` (see `src/face_registry_resolve.py`). |
 | `face_match_threshold`    | `float` | `85.0` | LBPH distance threshold (lower is better).                                                |
+| `primary_hysteresis_frames` | `int` | `0`   | Passed to `FaceDetector` in face mode (see CLI flag). Ignored for ArUco.                 |
 
 If `enable_pan_tilt=True` but the port cannot be opened, the loop prints a warning and continues in digital-only mode — it never raises.
+
+### Face vs ArUco exposure (Session 26)
+
+ArUco exposure sweep minimizes **geometry uncertainty** (`UncertaintyEngine` on marker corners). Face mode uses the same sweep machinery but **scores each exposure** with extra terms so winners stay closer to **enrollment-friendly** lighting:
+
+- **`face_exposure_lbph_weight`** (default `0.12`): adds a term proportional to **LBPH distance** on the primary face (when detected), so lower distance beats marginally lower `raw_u`.
+- **`face_exposure_brightness_weight`** (default `0.10`): penalizes **very bright** primary-face ROIs (mean V in HSV) to reduce skin blow-out that hurts Haar/LBPH vs registry crops.
+- **`exposure_tiebreak_preferred_val`**: among near-tie winners, prefer the hardware exposure level closest to this OpenCV log value (face default **-6.0**, ArUco **-4.0** — shorter exposure bias for skin).
+- **`face_exposure_indices`**: optional `list[int]` of indices into `policy.exposure_levels`; when set in **face** mode only, the sweep visits that subset (faster calibration).
+
+**Recommended tuning order (face):** (1) enroll under similar light to the demo room; (2) run with auto exposure on and trigger 1–2 sweeps (change room light or temporarily cover lens); (3) if names flip to `?` after sweep, lower `face_match_threshold` slightly or tighten `face_exposure_brightness_weight` / `exposure_tiebreak_preferred_val`; (4) use `--no-auto-exposure` to confirm the regression is exposure-related.
+
+**UncertaintyEngine** uses `FACE_UNCERTAINTY_PARAMS` / `ARUCO_UNCERTAINTY_PARAMS` in `src/uncertainty.py` (avoid duplicating magic numbers in `loop.py`). In **`mixed`/`auto`** mode, the engine switches with `perception.active_backend` (`"aruco"` vs `"face"`).
+
+**Mixed / auto:** both targets are drawn; **zoom / pan-tilt / exposure** follow the **active** target only. This is not “fuse two distances into one LBPH score”—it is **one primary ROI per frame** chosen by `mixed_policy`.
+
+**Pan-tilt (face defaults on the loop):** `pan_tilt_gain_pan` **6.5**, `pan_tilt_gain_tilt` **4.5**, `pan_tilt_deadzone` **0.055** (ArUco defaults remain **8.0 / 5.0 / 0.05** if you start in marker mode). **Physical search** uses a **narrower tilt grid** in face mode (desk / standing height band).
 
 ### Tuning knobs (public attributes)
 
@@ -121,6 +147,10 @@ Set these after construction, before `run()`, to tweak behavior without editing 
 | `zoom_sample_frames`               | `2`     | Same, for zoom sweep.                                           |
 | `detect_confirm_frames`            | `2`     | Consecutive detections before `confirmed_detected = True`.      |
 | `lost_confirm_frames`              | `3`     | Consecutive misses before `confirmed_lost = True`.              |
+| `exposure_tiebreak_preferred_val`  | `-6` face / `-4` aruco | Near-tie exposure winner prefers level closest to this value. |
+| `face_exposure_lbph_weight`        | `0.12`  | Face sweep only: weight on normalized LBPH distance.            |
+| `face_exposure_brightness_weight`  | `0.10`  | Face sweep only: weight on ROI highlight penalty.               |
+| `face_exposure_indices`            | `None`  | Face only: optional list of exposure indices to sweep.         |
 
 ### Methods
 
@@ -137,7 +167,8 @@ Session 25 layout: **one `detect` / `visualize` contract** for the loop; ArUco a
 | `PerceptionDetector` | ABC: `detect`, `visualize`. |
 | `ArucoDetector` | Marker detection (default). Alias export: `PerceptionSystem`. |
 | `FaceDetector` | Haar frontal face + LBPH; largest face = primary target; HUD shows name or `?`. |
-| `create_perception(mode, face_registry_dir=..., face_match_threshold=...)` | Factory used by `ActivePerceptionLoop`. |
+| `CombinedPerception` | Runs ArUco + face; sets `active_backend`; `detect` returns the **chosen** primary only. |
+| `create_perception(..., mixed_policy=...)` | Factory; `mode` includes `mixed` / `auto`. |
 
 Smoke test (ArUco only): `python -m src.perception` (opens camera index `1`).
 

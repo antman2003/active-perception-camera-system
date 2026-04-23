@@ -18,7 +18,10 @@ Which camera index is USB? (Windows)
   Then use e.g. --cam 2 if your external device is index 2.
   Enrollment uses the same backends as the main app (DirectShow / MSMF).
 
-Run the demo:
+Run the demo (default registry = repo ./face_registry if you omit --face-registry):
+  python demo.py --perception face --cam 1
   python demo.py --perception face --face-registry face_registry --cam 1
+  python demo.py --perception mixed --cam 1
+  python demo.py --perception auto --mixed-policy larger_area --cam 1
 
 Tune --face-threshold if you see "?" too often (try 95) or wrong IDs (try 70).

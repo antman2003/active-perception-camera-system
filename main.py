@@ -73,21 +73,45 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--perception",
-        choices=["aruco", "face"],
-        default="aruco",
-        help="Detection backend for full mode (default: aruco).",
+        choices=["aruco", "face", "mixed", "auto"],
+        default="mixed",
+        help="full mode: mixed (default) | auto (=mixed) | aruco | face.",
+    )
+    parser.add_argument(
+        "--mixed-policy",
+        choices=["aruco_first", "face_first", "larger_area"],
+        default="aruco_first",
+        help="With mixed|auto: which target drives tracking (default: aruco_first).",
     )
     parser.add_argument(
         "--face-registry",
         type=str,
         default=None,
-        help="Enrolled faces root folder (required when --perception face).",
+        help="Enrolled faces root. Omitted in face|mixed|auto → repo ./face_registry (must exist).",
     )
     parser.add_argument(
         "--face-threshold",
         type=float,
         default=85.0,
         help="LBPH distance threshold for face ID (default: 85).",
+    )
+    parser.add_argument(
+        "--no-auto-exposure",
+        action="store_true",
+        help="Disable automatic exposure sweeps (full mode).",
+    )
+    parser.add_argument(
+        "--face-primary-hysteresis",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Face mode: defer primary switch when two faces are similar size (0=off).",
+    )
+    parser.add_argument(
+        "--gesture-actions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Session 27b: MediaPipe hand gestures (default: on). Disable with --no-gesture-actions.",
     )
     return parser.parse_args(argv)
 
@@ -121,9 +145,6 @@ def main(argv=None):
 
     try:
         if args.mode == "full":
-            if args.perception == "face" and not args.face_registry:
-                print("[ERROR] --perception face requires --face-registry <folder>")
-                sys.exit(1)
             run_full_demo(
                 camera_id=args.cam,
                 debug=args.debug,
@@ -132,6 +153,10 @@ def main(argv=None):
                 perception_mode=args.perception,
                 face_registry_dir=args.face_registry,
                 face_match_threshold=args.face_threshold,
+                enable_exposure_control=not args.no_auto_exposure,
+                primary_hysteresis_frames=args.face_primary_hysteresis,
+                mixed_policy=args.mixed_policy,
+                enable_gesture_actions=args.gesture_actions,
             )
         elif args.mode == "uncertainty":
             if args.debug:

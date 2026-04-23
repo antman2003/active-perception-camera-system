@@ -17,6 +17,21 @@ import numpy as np
 from collections import deque
 from typing import Tuple, List, Optional
 
+# Defaults for `UncertaintyEngine` by perception mode (Session 26 — avoid magic numbers in loop).
+ARUCO_UNCERTAINTY_PARAMS = {
+    "sharpness_low": 20.0,
+    "sharpness_high": 500.0,
+    "size_low": 500.0,
+    "size_high": 150000.0,
+}
+FACE_UNCERTAINTY_PARAMS = {
+    "sharpness_low": 15.0,
+    "sharpness_high": 650.0,
+    "size_low": 3000.0,
+    "size_high": 170000.0,
+}
+
+
 class UncertaintyEngine:
     """
     Computes "Uncertainty Score" (0.0 to 1.0) for a single frame.
@@ -202,15 +217,36 @@ def run_uncertainty_demo(camera_id: int = 1):
             # Bar chart for uncertainty (Red=High, Green=Low)
             bar_width = int(smooth_score * 200)
             color = (0, 0, 255) if smooth_score > 0.5 else (0, 255, 0)
-            cv2.rectangle(vis_frame, (10, 60), (10 + bar_width, 80), color, -1)
-            cv2.putText(vis_frame, f"Uncertainty: {smooth_score:.2f}", (220, 75), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            
-            # Debug info
-            cv2.putText(vis_frame, f"Sharpness: {metrics['sharpness_raw']:.0f}", (10, 100),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            cv2.putText(vis_frame, f"Size: {metrics['size_raw']:.0f}", (10, 120),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            cv2.rectangle(vis_frame, (10, 62), (10 + bar_width, 80), color, -1)
+            cv2.putText(
+                vis_frame,
+                f"Uncertainty: {smooth_score:.2f}",
+                (220, 52),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2,
+            )
+
+            # Debug info (below bar; matches full loop HUD spacing)
+            cv2.putText(
+                vis_frame,
+                f"Sharpness: {metrics['sharpness_raw']:.0f}",
+                (10, 96),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (200, 200, 200),
+                1,
+            )
+            cv2.putText(
+                vis_frame,
+                f"Size: {metrics['size_raw']:.0f}",
+                (10, 116),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (200, 200, 200),
+                1,
+            )
 
             camera.display(vis_frame, "Uncertainty Test")
             

@@ -9,6 +9,8 @@ States:
 """
 
 import time
+
+import cv2
 import numpy as np
 
 def _aruco_centroid_pixel(corners) -> tuple:
@@ -21,10 +23,70 @@ def _aruco_centroid_pixel(corners) -> tuple:
     return mx, my
 
 
+def _use_face_exposure_scoring(context) -> bool:
+    """Face-style exposure sweep scoring (LBPH + ROI) when tracking a face."""
+    if getattr(context, "perception_mode", "") == "face":
+        return True
+    if getattr(context, "perception_mode", "") != "mixed":
+        return False
+    return getattr(getattr(context, "perception", None), "active_backend", None) == "face"
+
+
+def _face_roi_brightness_penalty(frame, corners) -> float:
+    """Penalty 0..~0.25 when primary face ROI is very bright (Session 26 exposure sweep)."""
+    if frame is None or corners is None or len(corners) < 1:
+        return 0.0
+    poly = corners[0][0].astype(np.int32)
+    x, y, bw, bh = cv2.boundingRect(poly)
+    h0, w0 = frame.shape[:2]
+    x = max(0, min(x, w0 - 1))
+    y = max(0, min(y, h0 - 1))
+    bw = max(1, min(bw, w0 - x))
+    bh = max(1, min(bh, h0 - y))
+    roi = frame[y : y + bh, x : x + bw]
+    if roi.size == 0:
+        return 0.0
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    v = float(np.mean(hsv[:, :, 2]))
+    if v <= 170.0:
+        return 0.0
+    return min(0.35, (v - 170.0) / 85.0 * 0.28)
+
+
+def _face_exposure_composite_score(context, raw_u, frame, corners, detected) -> float:
+    """
+    Face mode: add LBPH distance + ROI highlight terms on top of uncertainty `raw_u`
+    so exposure winners track recognition-friendly lighting, not only geometry.
+    """
+    if not _use_face_exposure_scoring(context):
+        return float(raw_u)
+    score = float(raw_u)
+    w_b = float(getattr(context, "face_exposure_brightness_weight", 0.0))
+    w_l = float(getattr(context, "face_exposure_lbph_weight", 0.0))
+    if detected and corners is not None and len(corners) > 0 and w_b > 0.0:
+        score += w_b * _face_roi_brightness_penalty(frame, corners)
+    if w_l > 0.0:
+        pc = getattr(context.perception, "primary_confidence", None)
+        th = float(getattr(context.perception, "match_threshold", 85.0) or 85.0)
+        if pc is not None and th > 1e-6:
+            score += w_l * min(1.0, float(pc) / th)
+    return min(1.5, score)
+
+
 def _log_event(context, event_type: str, frame=None, screenshot_name=None, **payload) -> None:
     logger = getattr(context, "blackbox", None)
     if logger is not None:
         logger.log_event(event_type, frame=frame, screenshot_name=screenshot_name, **payload)
+
+
+def _gesture_quiet_auto_explore(context) -> bool:
+    """
+    True while MediaPipe sees a hand (``gesture_hands_for_explore_quiet``).
+
+    Suppresses entering auto exposure / zoom exploration from MONITOR and
+    aborts in-progress sweeps so gesture demos are not visually interrupted.
+    """
+    return bool(getattr(context, "gesture_hands_for_explore_quiet", False))
 
 
 class State:
@@ -99,12 +161,17 @@ class MonitorState(State):
 
         # 4. Trigger EXPOSURE EXPLORE with hysteresis + consecutive-frame gating
         if context.enable_exposure_control and context.policy.exposure_supported:
-            if env_changed and uncertainty >= self.explore_enter_threshold:
+            if _gesture_quiet_auto_explore(context):
+                self._explore_trigger_count = 0
+            elif env_changed and uncertainty >= self.explore_enter_threshold:
                 self._explore_trigger_count += 1
             elif (not env_changed) or (uncertainty <= self.explore_exit_threshold):
                 self._explore_trigger_count = 0
 
-            if self._explore_trigger_count >= self.explore_trigger_frames:
+            if (
+                self._explore_trigger_count >= self.explore_trigger_frames
+                and not _gesture_quiet_auto_explore(context)
+            ):
                 print(f"[!] Triggering EXPLORE (Score: {uncertainty:.2f})")
                 context.baseline_brightness = None
                 self._explore_trigger_count = 0
@@ -120,6 +187,8 @@ class MonitorState(State):
             self._explore_trigger_count = 0
 
         # 5. Check Target Size Change and Quality
+        if _gesture_quiet_auto_explore(context):
+            self._zoom_trigger_count = 0
         if context.enable_zoom_control and context.frame_count >= context.zoom_ignore_until_frame:
             if context.baseline_size is None and context.confirmed_detected:
                 context.baseline_size = size_value
@@ -157,7 +226,9 @@ class MonitorState(State):
                 poor_quality_at_base = False
             
             # 6. Trigger ZOOM EXPLORE
-            if (not context.zoom_initialized) or size_changed or poor_quality_at_base:
+            if (
+                (not context.zoom_initialized) or size_changed or poor_quality_at_base
+            ) and not _gesture_quiet_auto_explore(context):
                 print(f"[!] Triggering ZOOM EXPLORE (Score: {uncertainty:.2f})")
                 context.baseline_size = None
                 _log_event(
@@ -196,7 +267,13 @@ class MonitorState(State):
                     return SniperRecoveryState()
                     
             # Smooth Digital Visual Servoing (Nudge ROI)
-            if detected and corners is not None and context.frame_count >= context.ignore_until_frame and context.frame_count >= context.zoom_ignore_until_frame:
+            if (
+                detected
+                and corners is not None
+                and context.frame_count >= context.ignore_until_frame
+                and context.frame_count >= context.zoom_ignore_until_frame
+                and not getattr(context, "gesture_pt_suppress", False)
+            ):
                 cent = _aruco_centroid_pixel(corners)
                 if cent is not None:
                     mx, my = cent
@@ -205,7 +282,9 @@ class MonitorState(State):
                     context.policy.nudge_roi_towards(tnx, tny, gain=context.monitor_nudge_gain)
 
         # 8. Physical Visual Servoing (Pan-Tilt)
-        if context.enable_pan_tilt and context.pan_tilt is not None:
+        if context.enable_pan_tilt and context.pan_tilt is not None and not getattr(
+            context, "gesture_pt_suppress", False
+        ):
             if detected and corners is not None:
                 self._pt_lost_frames = 0
                 pose = context.pan_tilt.current_pose
@@ -253,22 +332,49 @@ class ExploreExposureState(State):
         self.sample_frames = 3
         self._settle_count = 0
         self._sample_scores = []
-        
+        self._exp_sequence = []
+
     def on_enter(self, context):
         print(f"[i] {self.name}: Initializing sweep, setting index 0.")
         self.settle_frames = context.exposure_settle_frames
         self.sample_frames = context.exposure_sample_frames
-        context.policy.execute_exposure(0)
+        n = len(context.policy.exposure_levels)
+        seq = getattr(context, "face_exposure_indices", None)
+        if seq is not None and _use_face_exposure_scoring(context):
+            self._exp_sequence = [i for i in sorted(set(seq)) if 0 <= i < n]
+            if not self._exp_sequence:
+                self._exp_sequence = list(range(n))
+        else:
+            self._exp_sequence = list(range(n))
+        self.explore_step = 0
+        context.policy.execute_exposure(self._exp_sequence[0])
         self._settle_count = 0
         self._sample_scores = []
 
     def update(self, context, frame, detected, corners, ids, smooth_u, raw_u, metrics, current_brightness, size_value):
+        if _gesture_quiet_auto_explore(context):
+            try:
+                context.policy.execute_exposure(int(context.current_exposure_idx))
+            except Exception:
+                pass
+            context.ignore_until_frame = context.frame_count + 8
+            _log_event(
+                context,
+                "explore_exposure_aborted",
+                frame_idx=context.frame_count,
+                reason="gesture_hands",
+            )
+            return MonitorState()
+
         if self._settle_count < self.settle_frames:
             self._settle_count += 1
             return self
 
-        current_idx = self.explore_step
-        self._sample_scores.append(raw_u)
+        current_idx = self._exp_sequence[self.explore_step]
+        sample_u = _face_exposure_composite_score(
+            context, raw_u, frame, corners, detected
+        )
+        self._sample_scores.append(sample_u)
 
         if len(self._sample_scores) < self.sample_frames:
             return self
@@ -282,11 +388,11 @@ class ExploreExposureState(State):
         
         self.explore_step += 1
         
-        if self.explore_step >= len(context.policy.exposure_levels):
+        if self.explore_step >= len(self._exp_sequence):
             self._apply_best_action(context)
             return MonitorState()
         else:
-            context.policy.execute_exposure(self.explore_step)
+            context.policy.execute_exposure(self._exp_sequence[self.explore_step])
             self._settle_count = 0
             self._sample_scores = []
             
@@ -301,7 +407,9 @@ class ExploreExposureState(State):
         # Markers: middle of the list (-4) worked well in tuning.
         # Faces: bias slightly shorter exposure (more negative OpenCV log scale on this camera)
         # to reduce skin blow-out, which wrecks Haar/LBPH vs enrollment lighting.
-        preferred_exposure_val = -6.0 if getattr(context, "perception_mode", "aruco") == "face" else -4.0
+        preferred_exposure_val = float(
+            getattr(context, "exposure_tiebreak_preferred_val", -4.0)
+        )
         best_idx = min(
             candidates, 
             key=lambda idx: (
@@ -356,6 +464,25 @@ class ExploreZoomState(State):
         self._target_center = None
 
     def update(self, context, frame, detected, corners, ids, smooth_u, raw_u, metrics, current_brightness, size_value):
+        if _gesture_quiet_auto_explore(context):
+            lvls = context.policy.zoom_levels
+            cur = float(context.policy.current_zoom_level)
+            try:
+                context.current_zoom_idx = lvls.index(cur)
+            except ValueError:
+                context.current_zoom_idx = 0
+                context.policy.set_zoom(lvls[0])
+            context.zoom_initialized = True
+            context.zoom_ignore_until_frame = context.frame_count + 15
+            _log_event(
+                context,
+                "explore_zoom_aborted",
+                frame_idx=context.frame_count,
+                reason="gesture_hands",
+                zoom=float(context.policy.current_zoom_level),
+            )
+            return MonitorState()
+
         if context.confirmed_detected and detected and corners is not None:
             cent = _aruco_centroid_pixel(corners)
             if cent is not None:
@@ -521,13 +648,15 @@ class PhysicalSearchState(State):
 
     _LOCAL_OFFSETS_PAN = [-15, 0, 15]
     _LOCAL_OFFSETS_TILT = [-15, 0, 15]
+    _FACE_LOCAL_OFFSETS_TILT = [-15, 0, 15]
     _WIDE_OFFSETS_PAN = [-50, -25, 0, 25, 50]
-    _WIDE_OFFSETS_TILT = [-25, 0, 25]
+    _WIDE_OFFSETS_TILT = [0, 25,-25]
+    _FACE_WIDE_OFFSETS_TILT = [0, 25,-25]
 
     _LOCAL_FRAMES_PER_POS = 6
-    _LOCAL_SETTLE_S = 0.4
+    _LOCAL_SETTLE_S = 0.6
     _WIDE_FRAMES_PER_POS = 12
-    _WIDE_SETTLE_S = 0.6
+    _WIDE_SETTLE_S = 1.2
 
     def __init__(self):
         super().__init__()
@@ -572,10 +701,20 @@ class PhysicalSearchState(State):
         local_positions = []
         last_pan = context.last_seen_pan
         last_tilt = context.last_seen_tilt
+        tilt_local = (
+            self._FACE_LOCAL_OFFSETS_TILT
+            if getattr(context, "perception_mode", "") == "face"
+            else self._LOCAL_OFFSETS_TILT
+        )
+        tilt_wide = (
+            self._FACE_WIDE_OFFSETS_TILT
+            if getattr(context, "perception_mode", "") == "face"
+            else self._WIDE_OFFSETS_TILT
+        )
         if last_pan is not None and last_tilt is not None:
             local_positions = self._build_grid(
                 last_pan, last_tilt,
-                self._LOCAL_OFFSETS_PAN, self._LOCAL_OFFSETS_TILT,
+                self._LOCAL_OFFSETS_PAN, tilt_local,
                 pan_limits, tilt_limits,
                 self._LOCAL_SETTLE_S, self._LOCAL_FRAMES_PER_POS,
             )
@@ -587,7 +726,7 @@ class PhysicalSearchState(State):
 
         wide_positions = self._build_grid(
             home.pan, home.tilt,
-            self._WIDE_OFFSETS_PAN, self._WIDE_OFFSETS_TILT,
+            self._WIDE_OFFSETS_PAN, tilt_wide,
             pan_limits, tilt_limits,
             self._WIDE_SETTLE_S, self._WIDE_FRAMES_PER_POS,
         )

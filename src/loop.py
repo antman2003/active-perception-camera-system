@@ -11,13 +11,21 @@ import cv2
 import time
 import numpy as np
 from collections import deque
+from typing import Optional
 from src.camera import Camera
 from src.controller import HardwareController
 from src.logger import BlackboxLogger
 from src.perception import create_perception
-from src.uncertainty import UncertaintyEngine, TemporalSmoother
+from src.uncertainty import (
+    ARUCO_UNCERTAINTY_PARAMS,
+    FACE_UNCERTAINTY_PARAMS,
+    UncertaintyEngine,
+    TemporalSmoother,
+)
 from src.policy import ActionPolicy
+from src.face_registry_resolve import resolve_face_registry_dir
 from src.states import MonitorState
+
 
 class ActivePerceptionLoop:
     def __init__(
@@ -32,6 +40,9 @@ class ActivePerceptionLoop:
         perception_mode: str = "aruco",
         face_registry_dir: str | None = None,
         face_match_threshold: float = 85.0,
+        primary_hysteresis_frames: int = 0,
+        mixed_policy: str = "aruco_first",
+        enable_gesture_actions: bool = True,
     ):
         print("Initializing System Modules...")
         
@@ -52,26 +63,59 @@ class ActivePerceptionLoop:
         
         # 2. Perception & Brain
         self.perception_mode = (perception_mode or "aruco").lower().strip()
+        if self.perception_mode == "auto":
+            self.perception_mode = "mixed"
+        self.mixed_policy = (mixed_policy or "aruco_first").lower().strip()
+        self.face_registry_dir: str | None = None
+        self.uncertainty_engine_aruco: Optional[UncertaintyEngine] = None
+        self.uncertainty_engine_face: Optional[UncertaintyEngine] = None
         if self.perception_mode == "face":
-            if not face_registry_dir:
-                raise ValueError("perception_mode='face' requires face_registry_dir")
-            # Face bbox + skin highlights: slightly wider sharpness band than marker defaults.
-            self.uncertainty_engine = UncertaintyEngine(
-                sharpness_low=15.0,
-                sharpness_high=650.0,
-                size_low=2500.0,
-                size_high=120000.0,
-            )
+            face_registry_dir = resolve_face_registry_dir(face_registry_dir)
+            self.face_registry_dir = face_registry_dir
+            print(f"[i] Face registry: {face_registry_dir}")
+            self.uncertainty_engine = UncertaintyEngine(**FACE_UNCERTAINTY_PARAMS)
         elif self.perception_mode == "aruco":
-            self.uncertainty_engine = UncertaintyEngine()
+            self.uncertainty_engine = UncertaintyEngine(**ARUCO_UNCERTAINTY_PARAMS)
+        elif self.perception_mode == "mixed":
+            face_registry_dir = resolve_face_registry_dir(face_registry_dir)
+            self.face_registry_dir = face_registry_dir
+            print(f"[i] Mixed perception (policy={self.mixed_policy}); face registry: {face_registry_dir}")
+            self.uncertainty_engine_aruco = UncertaintyEngine(**ARUCO_UNCERTAINTY_PARAMS)
+            self.uncertainty_engine_face = UncertaintyEngine(**FACE_UNCERTAINTY_PARAMS)
+            self.uncertainty_engine = self.uncertainty_engine_aruco
         else:
-            raise ValueError("perception_mode must be 'aruco' or 'face'")
+            raise ValueError(
+                "perception_mode must be 'aruco', 'face', 'mixed', or 'auto'"
+            )
         self.perception = create_perception(
             self.perception_mode,
             face_registry_dir=face_registry_dir,
             face_match_threshold=face_match_threshold,
+            primary_hysteresis_frames=primary_hysteresis_frames,
+            mixed_policy=self.mixed_policy,
         )
         self.smoother = TemporalSmoother(window_size=5)
+
+        self.enable_gesture_actions = bool(enable_gesture_actions)
+        self._hand_detector = None
+        self._gesture_engine = None
+        self.gesture_label: str | None = None
+        self.gesture_pt_suppress = False
+        self.gesture_hands_for_explore_quiet: bool = False
+        # (Removed) gesture_pointing_pan_deg / tilt_deg: pointing no longer triggers actions.
+        if self.enable_gesture_actions:
+            try:
+                from src.gesture_actions import GestureActionEngine
+                from src.perception.hand import HandGestureDetector
+
+                self._hand_detector = HandGestureDetector()
+                self._gesture_engine = GestureActionEngine()
+                print(
+                    "[i] Gesture actions: ON (fist/pointing/thumbs/victory/heart; mediapipe + pan-tilt)"
+                )
+            except ImportError as e:
+                print(f"[!] Gesture actions disabled: {e}")
+                self.enable_gesture_actions = False
         
         # 3. Action
         self.policy = ActionPolicy(self.camera)
@@ -111,6 +155,26 @@ class ActivePerceptionLoop:
         self.last_seen_pan = None
         self.last_seen_tilt = None
         self.sniper_timeout_frames = 60
+
+        # Session 26: face vs ArUco exposure tie-break + optional sweep subset / score shaping.
+        self.exposure_tiebreak_preferred_val = (
+            -6.0 if self.perception_mode == "face" else -4.0
+        )
+        self.face_exposure_lbph_weight = 0.12
+        self.face_exposure_brightness_weight = 0.10
+        self.face_exposure_indices = None  # None = full sweep; else list of exposure level indices
+
+        if self.perception_mode == "face":
+            # Larger faces + centroid stability: slightly softer PT gains than marker defaults.
+            self.pan_tilt_gain_pan = 6.5
+            self.pan_tilt_gain_tilt = 4.5
+            self.pan_tilt_deadzone = 0.055
+        self._pt_gain_pan_aruco = 8.0
+        self._pt_gain_tilt_aruco = 5.0
+        self._pt_deadzone_aruco = 0.05
+        self._pt_gain_pan_face = 6.5
+        self._pt_gain_tilt_face = 4.5
+        self._pt_deadzone_face = 0.055
 
         self.exposure_settle_frames = 2
         self.exposure_sample_frames = 3
@@ -153,6 +217,7 @@ class ActivePerceptionLoop:
             "session_started",
             camera_id=camera_id,
             initial_state=self.current_state.name,
+            enable_gesture_actions=self.enable_gesture_actions,
         )
 
     def run(self, duration_s: float = None):
@@ -174,6 +239,41 @@ class ActivePerceptionLoop:
                 # --- Step 2: Perceive ---
                 frame = self.policy.apply_digital_zoom(frame)
                 detected, ids, corners = self.perception.detect(frame)
+
+                self.gesture_label = None
+                self.gesture_pt_suppress = False
+                self.gesture_hands_for_explore_quiet = False
+                if self.enable_gesture_actions and self._hand_detector is not None and self._gesture_engine is not None:
+                    glab, _conf = self._hand_detector.classify(frame)
+                    self.gesture_label = glab
+                    self._gesture_engine.tick(glab, self)
+                    self.gesture_pt_suppress = self._gesture_engine.pt_suppress
+                    self.gesture_hands_for_explore_quiet = bool(
+                        getattr(self._hand_detector, "hands_visible", False)
+                    )
+
+                # Tracking target priority: **hand (MediaPipe) > ArUco > face** when gesture path is on.
+                if (
+                    self.enable_gesture_actions
+                    and self._hand_detector is not None
+                    and getattr(self._hand_detector, "hands_visible", False)
+                    and self._hand_detector.primary_hand_landmarks is not None
+                ):
+                    from src.perception.hand import hand_landmarks_to_aruco_corners
+
+                    lm = self._hand_detector.primary_hand_landmarks
+                    corners = [hand_landmarks_to_aruco_corners(lm, frame.shape)]
+                    ids = np.array([[-1]], dtype=np.int32)
+                    detected = True
+                    if hasattr(self.perception, "active_backend"):
+                        self.perception.active_backend = "gesture"
+                elif (
+                    self.enable_gesture_actions
+                    and self.perception_mode == "mixed"
+                    and hasattr(self.perception, "pick_aruco_before_face")
+                ):
+                    detected, ids, corners = self.perception.pick_aruco_before_face()
+
                 if detected:
                     self.detected_streak += 1
                     self.lost_streak = 0
@@ -184,9 +284,25 @@ class ActivePerceptionLoop:
                 self.confirmed_detected = self.detected_streak >= self.detect_confirm_frames
                 self.confirmed_lost = self.lost_streak >= self.lost_confirm_frames
                 self.detection_history.append(1 if detected else 0)
-                
+
                 # --- Step 3: Evaluate (Brain) ---
-                raw_u, metrics = self.uncertainty_engine.compute(frame, corners)
+                if self.perception_mode == "mixed":
+                    ab = getattr(self.perception, "active_backend", None) or "aruco"
+                    if ab == "face":
+                        self.pan_tilt_gain_pan = self._pt_gain_pan_face
+                        self.pan_tilt_gain_tilt = self._pt_gain_tilt_face
+                        self.pan_tilt_deadzone = self._pt_deadzone_face
+                        self.exposure_tiebreak_preferred_val = -6.0
+                        unc_engine = self.uncertainty_engine_face
+                    else:
+                        self.pan_tilt_gain_pan = self._pt_gain_pan_aruco
+                        self.pan_tilt_gain_tilt = self._pt_gain_tilt_aruco
+                        self.pan_tilt_deadzone = self._pt_deadzone_aruco
+                        self.exposure_tiebreak_preferred_val = -4.0
+                        unc_engine = self.uncertainty_engine_aruco
+                    raw_u, metrics = unc_engine.compute(frame, corners)
+                else:
+                    raw_u, metrics = self.uncertainty_engine.compute(frame, corners)
                 smooth_u = self.smoother.update(raw_u)
                 
                 # --- Step 4: Act (State Machine Update) ---
@@ -253,6 +369,11 @@ class ActivePerceptionLoop:
                 except Exception:
                     pass
                 self.pan_tilt.close()
+            if self._hand_detector is not None:
+                try:
+                    self._hand_detector.close()
+                except Exception:
+                    pass
             self.camera.release()
             print("System Shutdown.")
 
@@ -316,6 +437,7 @@ class ActivePerceptionLoop:
             "mode_flags": {
                 "enable_exposure_control": self.enable_exposure_control,
                 "enable_zoom_control": self.enable_zoom_control,
+                "enable_gesture_actions": self.enable_gesture_actions,
             },
         }
 
@@ -424,35 +546,92 @@ class ActivePerceptionLoop:
         # 1. Draw markers
         annotated = self.perception.visualize(frame, corners, ids)
             
-        # 2. Status Bar
+        # 2–3. Top-center / right column (avoid overlap with perception text at left)
         color = (0, 255, 0) if self.current_state.name == "MONITOR" else (0, 255, 255)
-        
-        cv2.putText(annotated, f"MODE: {self.current_state.name}", (220, 30), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+        rx = 220
+        y_mode = 28
+        cv2.putText(
+            annotated,
+            f"MODE: {self.current_state.name}",
+            (rx, y_mode),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            color,
+            2,
+        )
+        y_gesture = 52
+        y_unc_text = 78
+        if self.enable_gesture_actions:
+            gtxt = self.gesture_label if self.gesture_label else "—"
+            gline = f"GESTURE: {gtxt}".strip()
+            cv2.putText(
+                annotated,
+                gline,
+                (rx, y_gesture),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (180, 255, 180),
+                2,
+            )
+        else:
+            y_unc_text = 52
 
-        # 3. Uncertainty Bar
+        # Uncertainty bar: below Faces / ACTIVE lines from visualize() (see combined.py y)
+        bar_top, bar_bot = 62, 80
         bar_len = int(uncertainty * 200)
         u_color = (0, 0, 255) if uncertainty > 0.6 else (0, 255, 0)
-        cv2.rectangle(annotated, (10, 50), (10 + bar_len, 70), u_color, -1)
-        cv2.putText(annotated, f"Uncertainty: {uncertainty:.2f}", (220, 65), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                   
-        # 4. Zoom Level HUD
+        cv2.rectangle(annotated, (10, bar_top), (10 + bar_len, bar_bot), u_color, -1)
+        cv2.putText(
+            annotated,
+            f"Uncertainty: {uncertainty:.2f}",
+            (rx, y_unc_text),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (255, 255, 255),
+            2,
+        )
+
+        # 4–6. Left column below uncertainty bar
+        y_zoom = 96
         zoom_text = f"ZOOM: {self.policy.current_zoom_level}x"
-        cv2.putText(annotated, zoom_text, (10, 100), 
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-                   
-        # 5. Debug Info (Sharpness & Size)
-        cv2.putText(annotated, f"Sharpness: {metrics.get('sharpness_raw', 0):.0f}", (10, 130),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-        cv2.putText(annotated, f"Size: {metrics.get('size_raw', 0):.0f}", (10, 150),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-                   
-        # 6. Pan-Tilt pose
+        cv2.putText(
+            annotated,
+            zoom_text,
+            (10, y_zoom),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2,
+        )
+        cv2.putText(
+            annotated,
+            f"Sharpness: {metrics.get('sharpness_raw', 0):.0f}",
+            (10, y_zoom + 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (200, 200, 200),
+            1,
+        )
+        cv2.putText(
+            annotated,
+            f"Size: {metrics.get('size_raw', 0):.0f}",
+            (10, y_zoom + 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (200, 200, 200),
+            1,
+        )
         if self.pan_tilt is not None:
             pose = self.pan_tilt.current_pose
-            cv2.putText(annotated, f"PT: P{pose.pan} T{pose.tilt}", (10, 170),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 200, 100), 1)
+            cv2.putText(
+                annotated,
+                f"PT: P{pose.pan} T{pose.tilt}",
+                (10, y_zoom + 68),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 200, 100),
+                1,
+            )
                    
         return annotated
 
