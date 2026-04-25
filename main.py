@@ -5,7 +5,7 @@ Unified CLI entry point for the active perception system.
 import argparse
 import sys
 
-from demo import run_full_demo, probe_pan_tilt
+from demo import apply_privacy_cli_preset, run_full_demo, probe_pan_tilt
 from src.benchmark import run_benchmark
 from src.policy import run_policy_demo
 from src.uncertainty import run_uncertainty_demo
@@ -113,7 +113,40 @@ def parse_args(argv=None):
         default=True,
         help="Session 27b: MediaPipe hand gestures (default: on). Disable with --no-gesture-actions.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--privacy",
+        action="store_true",
+        help="One-flag strong display privacy (blur + labels). See demo --help.",
+    )
+    parser.add_argument(
+        "--privacy-blur-faces",
+        action="store_true",
+        help="Face blur with default tuning; use --privacy for stronger one-liner.",
+    )
+    parser.add_argument(
+        "--privacy-blur-kernel",
+        type=int,
+        default=99,
+        help="Blur kernel (odd, >=3; default 99).",
+    )
+    parser.add_argument(
+        "--privacy-blur-pad",
+        type=float,
+        default=0.10,
+        metavar="R",
+        help="BBox pad ratio before blur (default 0.10).",
+    )
+    parser.add_argument(
+        "--privacy-blur-passes",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Blur passes per ROI (default 2).",
+    )
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(argv)
+    apply_privacy_cli_preset(args, raw)
+    return args
 
 
 def print_mode_banner(mode: str, cam_id: int, debug: bool,
@@ -157,6 +190,10 @@ def main(argv=None):
                 primary_hysteresis_frames=args.face_primary_hysteresis,
                 mixed_policy=args.mixed_policy,
                 enable_gesture_actions=args.gesture_actions,
+                privacy_blur_faces=args.privacy_blur_faces,
+                privacy_blur_kernel=args.privacy_blur_kernel,
+                privacy_blur_pad=args.privacy_blur_pad,
+                privacy_blur_passes=args.privacy_blur_passes,
             )
         elif args.mode == "uncertainty":
             if args.debug:

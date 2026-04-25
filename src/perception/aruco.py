@@ -29,7 +29,11 @@ class ArucoDetector(PerceptionDetector):
         return False, None, None
 
     def visualize(
-        self, frame: np.ndarray, corners: Any, ids: Optional[np.ndarray]
+        self,
+        frame: np.ndarray,
+        corners: Any,
+        ids: Optional[np.ndarray],
+        face_label_override: Optional[str] = None,
     ) -> np.ndarray:
         if corners is None or ids is None:
             return frame

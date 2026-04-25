@@ -6,7 +6,7 @@ HUD draws both; ``active_backend`` is ``\"aruco\"`` | ``\"face\"`` | ``None``.
 
 from __future__ import annotations
 
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -61,6 +61,10 @@ class CombinedPerception(PerceptionDetector):
         self._aruco_corners = None
         self._face_corners = None
         print(f"Perception (mixed): policy={self.mixed_policy}")
+
+    @property
+    def last_face_boxes(self) -> List[Tuple[int, int, int, int]]:
+        return self._face.last_face_boxes
 
     def _pick(self) -> Tuple[bool, Any, Any]:
         a_ok = self._aruco_det
@@ -133,12 +137,17 @@ class CombinedPerception(PerceptionDetector):
         frame: np.ndarray,
         corners: Any,
         ids: Optional[np.ndarray],
+        face_label_override: Optional[str] = None,
     ) -> np.ndarray:
         out = frame.copy()
         if self._aruco_det:
-            out = self._aruco.visualize(out, self._aruco_corners, self._aruco_ids)
+            out = self._aruco.visualize(
+                out, self._aruco_corners, self._aruco_ids, face_label_override
+            )
         if self._face_det:
-            out = self._face.visualize(out, self._face_corners, self._face_ids)
+            out = self._face.visualize(
+                out, self._face_corners, self._face_ids, face_label_override
+            )
         tag = self.active_backend or "none"
         # Baseline ~50: below "Faces:" / marker HUD at y≈30, above uncertainty bar in loop (y≈62+)
         cv2.putText(

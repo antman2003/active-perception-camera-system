@@ -16,6 +16,7 @@ from src.camera import Camera
 from src.controller import HardwareController
 from src.logger import BlackboxLogger
 from src.perception import create_perception
+from src.perception.privacy_blur import blur_face_boxes_bgr, collect_face_boxes
 from src.uncertainty import (
     ARUCO_UNCERTAINTY_PARAMS,
     FACE_UNCERTAINTY_PARAMS,
@@ -25,6 +26,9 @@ from src.uncertainty import (
 from src.policy import ActionPolicy
 from src.face_registry_resolve import resolve_face_registry_dir
 from src.states import MonitorState
+
+# Display privacy: anonymized face box caption (LBPH identity hidden on HUD).
+PRIVACY_FACE_HUD_LABEL = "Test Object One"
 
 
 class ActivePerceptionLoop:
@@ -43,6 +47,10 @@ class ActivePerceptionLoop:
         primary_hysteresis_frames: int = 0,
         mixed_policy: str = "aruco_first",
         enable_gesture_actions: bool = True,
+        privacy_blur_faces: bool = False,
+        privacy_blur_kernel: int = 99,
+        privacy_blur_pad: float = 0.10,
+        privacy_blur_passes: int = 2,
     ):
         print("Initializing System Modules...")
         
@@ -94,6 +102,22 @@ class ActivePerceptionLoop:
             primary_hysteresis_frames=primary_hysteresis_frames,
             mixed_policy=self.mixed_policy,
         )
+        self.privacy_blur_faces = bool(privacy_blur_faces)
+        self._privacy_blur_kernel = max(3, int(privacy_blur_kernel))
+        self._privacy_blur_pad = max(0.0, float(privacy_blur_pad))
+        self._privacy_blur_passes = max(1, int(privacy_blur_passes))
+        if self.privacy_blur_faces and self.perception_mode == "aruco":
+            print(
+                "[i] privacy_blur_faces: no face detector in aruco mode; display blur disabled."
+            )
+            self.privacy_blur_faces = False
+        elif self.privacy_blur_faces:
+            print(
+                "[i] Privacy: face regions blurred on display only "
+                f"(kernel={self._privacy_blur_kernel}, pad={self._privacy_blur_pad}, "
+                f"passes={self._privacy_blur_passes}); "
+                "tracking uses the raw frame."
+            )
         self.smoother = TemporalSmoother(window_size=5)
 
         self.enable_gesture_actions = bool(enable_gesture_actions)
@@ -128,7 +152,14 @@ class ActivePerceptionLoop:
         # 4. Context Variables (accessed by states)
         self.current_exposure_idx = 3
         self.current_zoom_idx = 0
-        
+        if self.privacy_blur_faces and self.perception_mode in ("face", "mixed"):
+            if self.enable_zoom_control:
+                print(
+                    "[i] Privacy: digital zoom auto-control disabled (display stays at 1.0x)."
+                )
+            self.enable_zoom_control = False
+            self.current_zoom_idx = 0
+
         self.baseline_brightness = None
         self.brightness_change_ratio = 0.10
         self.frame_count = 0
@@ -438,6 +469,7 @@ class ActivePerceptionLoop:
                 "enable_exposure_control": self.enable_exposure_control,
                 "enable_zoom_control": self.enable_zoom_control,
                 "enable_gesture_actions": self.enable_gesture_actions,
+                "privacy_blur_faces": self.privacy_blur_faces,
             },
         }
 
@@ -543,8 +575,28 @@ class ActivePerceptionLoop:
         Draw status on screen.
         Returns: Annotated frame
         """
-        # 1. Draw markers
-        annotated = self.perception.visualize(frame, corners, ids)
+        # 1. Perception overlay (optional display-only blur + anonymized face labels)
+        face_label_override = (
+            PRIVACY_FACE_HUD_LABEL
+            if self.privacy_blur_faces and self.perception_mode in ("face", "mixed")
+            else None
+        )
+        if self.privacy_blur_faces and self.perception_mode in ("face", "mixed"):
+            vis_base = np.copy(frame)
+            blur_face_boxes_bgr(
+                vis_base,
+                collect_face_boxes(self.perception),
+                kernel_size=self._privacy_blur_kernel,
+                pad_ratio=self._privacy_blur_pad,
+                passes=self._privacy_blur_passes,
+            )
+            annotated = self.perception.visualize(
+                vis_base, corners, ids, face_label_override
+            )
+        else:
+            annotated = self.perception.visualize(
+                frame, corners, ids, face_label_override
+            )
             
         # 2–3. Top-center / right column (avoid overlap with perception text at left)
         color = (0, 255, 0) if self.current_state.name == "MONITOR" else (0, 255, 255)
@@ -590,6 +642,16 @@ class ActivePerceptionLoop:
             (255, 255, 255),
             2,
         )
+        if self.privacy_blur_faces:
+            cv2.putText(
+                annotated,
+                "PRIVACY: face blur",
+                (rx, 102),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (180, 180, 255),
+                1,
+            )
 
         # 4–6. Left column below uncertainty bar
         y_zoom = 96

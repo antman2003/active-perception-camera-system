@@ -24,5 +24,10 @@ class PerceptionDetector(ABC):
         frame: np.ndarray,
         corners: Any,
         ids: Optional[np.ndarray],
+        face_label_override: Optional[str] = None,
     ) -> np.ndarray:
-        """Draw targets on a copy of `frame` and return it."""
+        """Draw targets on a copy of `frame` and return it.
+
+        ``face_label_override``: when set, face HUD uses this text instead of enrolled names
+        (used with display privacy blur).
+        """

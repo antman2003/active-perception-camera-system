@@ -83,6 +83,11 @@ class FaceDetector(PerceptionDetector):
 
         print(f"Face perception: {len(self._names)} enrolled — {', '.join(self._names)}")
 
+    @property
+    def last_face_boxes(self) -> List[Tuple[int, int, int, int]]:
+        """本帧 ``detect`` 得到的所有人脸框 ``(x, y, w, h)``（供隐私模糊等）。"""
+        return [(int(f[0]), int(f[1]), int(f[2]), int(f[3])) for f in self._viz_faces]
+
     def _train_from_registry(self) -> None:
         faces: List[np.ndarray] = []
         labels: List[int] = []
@@ -208,15 +213,23 @@ class FaceDetector(PerceptionDetector):
         return True, ids, corners
 
     def visualize(
-        self, frame: np.ndarray, corners: Any, ids: Optional[np.ndarray]
+        self,
+        frame: np.ndarray,
+        corners: Any,
+        ids: Optional[np.ndarray],
+        face_label_override: Optional[str] = None,
     ) -> np.ndarray:
         out = frame.copy()
         for (x, y, w, h, name, dist) in self._viz_faces:
-            color = (0, 255, 0) if name != "?" else (0, 165, 255)
+            if face_label_override is not None:
+                label = face_label_override
+                color = (0, 255, 0)
+            else:
+                color = (0, 255, 0) if name != "?" else (0, 165, 255)
+                label = f"{name}"
+                if name != "?":
+                    label += f" (d={dist:.0f})"
             cv2.rectangle(out, (x, y), (x + w, y + h), color, 2)
-            label = f"{name}"
-            if name != "?":
-                label += f" (d={dist:.0f})"
             draw_label_bottom_center_in_box(out, label, (x, y, w, h), color)
 
         if self._viz_faces:

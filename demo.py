@@ -12,6 +12,42 @@ import serial
 from src.face_registry_resolve import resolve_face_registry_dir
 from src.loop import ActivePerceptionLoop
 
+# Strong display-privacy preset for ``--privacy`` (matches prior CLI recommendations).
+PRIVACY_CLI_PRESET_KERNEL = 151
+PRIVACY_CLI_PRESET_PASSES = 3
+PRIVACY_CLI_PRESET_PAD = 0.15
+
+
+def _argv_privacy_blur_tokens(argv: list[str]) -> dict[str, bool]:
+    """True if argv contains an explicit ``--privacy-blur-*`` token (supports ``--opt=value``)."""
+    out = {"kernel": False, "passes": False, "pad": False}
+    for t in argv:
+        if t.startswith("--privacy-blur-kernel"):
+            out["kernel"] = True
+        elif t.startswith("--privacy-blur-passes"):
+            out["passes"] = True
+        elif t.startswith("--privacy-blur-pad"):
+            out["pad"] = True
+    return out
+
+
+def apply_privacy_cli_preset(args: argparse.Namespace, argv: list[str]) -> None:
+    """
+    If ``--privacy``: enable face blur and apply strong defaults, unless the user
+    already passed the corresponding ``--privacy-blur-*`` flag.
+    """
+    if not getattr(args, "privacy", False):
+        return
+    args.privacy_blur_faces = True
+    explicit = _argv_privacy_blur_tokens(argv)
+    if not explicit["kernel"]:
+        args.privacy_blur_kernel = PRIVACY_CLI_PRESET_KERNEL
+    if not explicit["passes"]:
+        args.privacy_blur_passes = PRIVACY_CLI_PRESET_PASSES
+    if not explicit["pad"]:
+        args.privacy_blur_pad = PRIVACY_CLI_PRESET_PAD
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Active Perception System Demo")
     parser.add_argument(
@@ -79,7 +115,44 @@ def parse_args(argv=None):
         default=True,
         help="Session 27b: MediaPipe hand gestures (default: on). Disable with --no-gesture-actions.",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--privacy",
+        action="store_true",
+        help="One-flag display privacy: blur faces + anonymized HUD labels, with strong "
+        f"defaults (kernel {PRIVACY_CLI_PRESET_KERNEL}, {PRIVACY_CLI_PRESET_PASSES} passes, "
+        f"pad {PRIVACY_CLI_PRESET_PAD}). Override pieces with --privacy-blur-kernel / "
+        "--privacy-blur-passes / --privacy-blur-pad.",
+    )
+    parser.add_argument(
+        "--privacy-blur-faces",
+        action="store_true",
+        help="Same blur pipeline as --privacy but uses milder built-in defaults unless you "
+        "add --privacy-blur-kernel / --privacy-blur-passes / --privacy-blur-pad.",
+    )
+    parser.add_argument(
+        "--privacy-blur-kernel",
+        type=int,
+        default=99,
+        help="Blur kernel size (odd, >=3; default 99). Larger = stronger blur.",
+    )
+    parser.add_argument(
+        "--privacy-blur-pad",
+        type=float,
+        default=0.10,
+        metavar="R",
+        help="Expand each face bbox by this fraction before blur (default 0.10).",
+    )
+    parser.add_argument(
+        "--privacy-blur-passes",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Gaussian blur passes per face ROI (default 2). More passes = stronger.",
+    )
+    raw = list(argv) if argv is not None else sys.argv[1:]
+    args = parser.parse_args(argv)
+    apply_privacy_cli_preset(args, raw)
+    return args
 
 
 def probe_pan_tilt(port: str) -> bool:
@@ -147,6 +220,10 @@ def run_full_demo(
     primary_hysteresis_frames: int = 0,
     mixed_policy: str = "aruco_first",
     enable_gesture_actions: bool = True,
+    privacy_blur_faces: bool = False,
+    privacy_blur_kernel: int = 99,
+    privacy_blur_pad: float = 0.10,
+    privacy_blur_passes: int = 2,
 ):
     pm = (perception_mode or "aruco").lower().strip()
     if pm == "auto":
@@ -179,6 +256,10 @@ def run_full_demo(
         primary_hysteresis_frames=primary_hysteresis_frames,
         mixed_policy=mixed_policy,
         enable_gesture_actions=enable_gesture_actions,
+        privacy_blur_faces=privacy_blur_faces,
+        privacy_blur_kernel=privacy_blur_kernel,
+        privacy_blur_pad=privacy_blur_pad,
+        privacy_blur_passes=privacy_blur_passes,
     )
     app.run()
 
@@ -208,6 +289,10 @@ def main(argv=None):
             primary_hysteresis_frames=args.face_primary_hysteresis,
             mixed_policy=args.mixed_policy,
             enable_gesture_actions=args.gesture_actions,
+            privacy_blur_faces=args.privacy_blur_faces,
+            privacy_blur_kernel=args.privacy_blur_kernel,
+            privacy_blur_pad=args.privacy_blur_pad,
+            privacy_blur_passes=args.privacy_blur_passes,
         )
     except RuntimeError as e:
         print(f"\n[ERROR] Failed to start system: {e}")
