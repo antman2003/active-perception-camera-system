@@ -138,6 +138,20 @@ class MonitorState(State):
         self.zoom_trigger_frames = context.monitor_zoom_trigger_frames
 
     def update(self, context, frame, detected, corners, ids, smooth_u, raw_u, metrics, current_brightness, size_value):
+        # Voice-triggered search: a safe external trigger (Session 30 step 5).
+        if getattr(context, "voice_request_search", False):
+            try:
+                context.voice_request_search = False
+            except Exception:
+                pass
+            _log_event(
+                context,
+                "voice_search_triggered",
+                frame_idx=getattr(context, "frame_count", None),
+                reason="voice_request_search_flag",
+            )
+            return PhysicalSearchState()
+
         # 1. Stabilization Check (Cooldown)
         if context.frame_count < context.ignore_until_frame:
             return self
@@ -282,8 +296,14 @@ class MonitorState(State):
                     context.policy.nudge_roi_towards(tnx, tny, gain=context.monitor_nudge_gain)
 
         # 8. Physical Visual Servoing (Pan-Tilt)
-        if context.enable_pan_tilt and context.pan_tilt is not None and not getattr(
-            context, "gesture_pt_suppress", False
+        voice_suppress_until = float(getattr(context, "voice_pt_suppress_until", 0.0) or 0.0)
+        voice_pt_allowed = time.time() >= voice_suppress_until
+
+        if (
+            context.enable_pan_tilt
+            and context.pan_tilt is not None
+            and not getattr(context, "gesture_pt_suppress", False)
+            and voice_pt_allowed
         ):
             if detected and corners is not None:
                 self._pt_lost_frames = 0

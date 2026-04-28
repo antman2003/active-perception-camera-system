@@ -149,6 +149,60 @@ def parse_args(argv=None):
         metavar="N",
         help="Gaussian blur passes per face ROI (default 2). More passes = stronger.",
     )
+    # Session 30: voice (PTT via 'v' in the OpenCV window)
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="Enable voice thread (PTT: press 'v' in the video window).",
+    )
+    parser.add_argument(
+        "--voice-mode",
+        type=str,
+        default="ptt",
+        choices=("ptt", "always"),
+        help="Voice mode: ptt (press 'v') or always (wake word + VAD capture). Default: ptt.",
+    )
+    parser.add_argument(
+        "--voice-lang",
+        type=str,
+        default="zh",
+        help="ASR language hint: zh | en | auto (default: zh).",
+    )
+    parser.add_argument(
+        "--voice-model",
+        type=str,
+        default="base",
+        help="faster-whisper model size for live PTT (default: base).",
+    )
+    parser.add_argument(
+        "--voice-record-seconds",
+        type=float,
+        default=5.0,
+        help="PTT recording window seconds per 'v' press (default: 5.0).",
+    )
+    parser.add_argument(
+        "--voice-save-wav",
+        action="store_true",
+        help="Save each PTT recording as a .wav under logs/blackbox/<session>/audio/ (debugging).",
+    )
+    parser.add_argument(
+        "--voice-llm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable local LLM fallback (Ollama) when rules yield noop (default: on). Disable with --no-voice-llm.",
+    )
+    parser.add_argument(
+        "--voice-llm-model",
+        type=str,
+        default="qwen2.5:1.5b",
+        help="Ollama model name for fallback (default: qwen2.5:1.5b).",
+    )
+    parser.add_argument(
+        "--voice-clarify",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable one-round clarification prompt when rules yield noop (default: off).",
+    )
     raw = list(argv) if argv is not None else sys.argv[1:]
     args = parser.parse_args(argv)
     apply_privacy_cli_preset(args, raw)
@@ -224,6 +278,15 @@ def run_full_demo(
     privacy_blur_kernel: int = 99,
     privacy_blur_pad: float = 0.10,
     privacy_blur_passes: int = 2,
+    enable_voice: bool = False,
+    voice_mode: str = "ptt",
+    voice_lang: str = "zh",
+    voice_model: str = "base",
+    voice_record_seconds: float = 5.0,
+    voice_llm: bool = False,
+    voice_llm_model: str = "qwen2.5:1.5b",
+    voice_clarify: bool = True,
+    voice_save_wav: bool = False,
 ):
     pm = (perception_mode or "aruco").lower().strip()
     if pm == "auto":
@@ -260,6 +323,15 @@ def run_full_demo(
         privacy_blur_kernel=privacy_blur_kernel,
         privacy_blur_pad=privacy_blur_pad,
         privacy_blur_passes=privacy_blur_passes,
+        enable_voice=enable_voice,
+        voice_mode=voice_mode,
+        voice_lang=voice_lang,
+        voice_model=voice_model,
+        voice_record_seconds=voice_record_seconds,
+        voice_llm=voice_llm,
+        voice_llm_model=voice_llm_model,
+        voice_clarify=voice_clarify,
+        voice_save_wav=voice_save_wav,
     )
     app.run()
 
@@ -293,6 +365,15 @@ def main(argv=None):
             privacy_blur_kernel=args.privacy_blur_kernel,
             privacy_blur_pad=args.privacy_blur_pad,
             privacy_blur_passes=args.privacy_blur_passes,
+            enable_voice=args.voice,
+            voice_mode=args.voice_mode,
+            voice_lang=args.voice_lang,
+            voice_model=args.voice_model,
+            voice_record_seconds=args.voice_record_seconds,
+            voice_llm=args.voice_llm,
+            voice_llm_model=args.voice_llm_model,
+            voice_clarify=args.voice_clarify,
+            voice_save_wav=args.voice_save_wav,
         )
     except RuntimeError as e:
         print(f"\n[ERROR] Failed to start system: {e}")

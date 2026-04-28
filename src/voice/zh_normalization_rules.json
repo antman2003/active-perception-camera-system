@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "notes": [
+    "Offline Chinese normalization rules for voice commands.",
+    "This is intentionally conservative: only fixes common ASR confusions in our domain."
+  ],
+  "replacements": [
+    {
+      "type": "literal",
+      "from": "武度",
+      "to": "五度",
+      "why": "ASR confusion: 五度 -> 武度"
+    },
+    {
+      "type": "literal",
+      "from": "舞度",
+      "to": "五度",
+      "why": "ASR confusion: 五度 -> 舞度"
+    }
+  ],
+  "regex_rules": [
+    {
+      "pattern": "((?:向)?(?:左|右|上|下).{0,3})(撞|装|赚)(?=.{0,6}度)",
+      "replacement": "\\1转",
+      "why": "ASR confusion for verb 转 in direction+degree command"
+    },
+    {
+      "pattern": "((?:转|轉))\\s*(?:有|无)度",
+      "replacement": "\\1五度",
+      "why": "ASR confusion: 五度 -> 有度/无度 (in rotate+degree context only)"
+    }
+  ]
+}
+

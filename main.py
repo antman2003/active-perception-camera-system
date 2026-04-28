@@ -118,6 +118,60 @@ def parse_args(argv=None):
         action="store_true",
         help="One-flag strong display privacy (blur + labels). See demo --help.",
     )
+    # Session 30: voice (PTT via 'v' in the OpenCV window)
+    parser.add_argument(
+        "--voice",
+        action="store_true",
+        help="Enable voice thread (PTT: press 'v' in the video window).",
+    )
+    parser.add_argument(
+        "--voice-mode",
+        type=str,
+        default="ptt",
+        choices=("ptt", "always"),
+        help="Voice mode: ptt (press 'v') or always (wake word + VAD capture). Default: ptt.",
+    )
+    parser.add_argument(
+        "--voice-lang",
+        type=str,
+        default="zh",
+        help="ASR language hint: zh | en | auto (default: zh).",
+    )
+    parser.add_argument(
+        "--voice-model",
+        type=str,
+        default="base",
+        help="faster-whisper model size for live PTT (default: base).",
+    )
+    parser.add_argument(
+        "--voice-record-seconds",
+        type=float,
+        default=5.0,
+        help="PTT recording window seconds per 'v' press (default: 5.0).",
+    )
+    parser.add_argument(
+        "--voice-save-wav",
+        action="store_true",
+        help="Save each PTT recording as a .wav under logs/blackbox/<session>/audio/ (debugging).",
+    )
+    parser.add_argument(
+        "--voice-llm",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable local LLM fallback (Ollama) when rules yield noop (default: on). Disable with --no-voice-llm.",
+    )
+    parser.add_argument(
+        "--voice-llm-model",
+        type=str,
+        default="qwen2.5:1.5b",
+        help="Ollama model name for fallback (default: qwen2.5:1.5b).",
+    )
+    parser.add_argument(
+        "--voice-clarify",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable one-round clarification prompt when rules yield noop (default: off).",
+    )
     parser.add_argument(
         "--privacy-blur-faces",
         action="store_true",
@@ -194,6 +248,15 @@ def main(argv=None):
                 privacy_blur_kernel=args.privacy_blur_kernel,
                 privacy_blur_pad=args.privacy_blur_pad,
                 privacy_blur_passes=args.privacy_blur_passes,
+                enable_voice=args.voice,
+                voice_mode=args.voice_mode,
+                voice_lang=args.voice_lang,
+                voice_model=args.voice_model,
+                voice_record_seconds=args.voice_record_seconds,
+                voice_llm=args.voice_llm,
+                voice_llm_model=args.voice_llm_model,
+                voice_clarify=args.voice_clarify,
+                voice_save_wav=args.voice_save_wav,
             )
         elif args.mode == "uncertainty":
             if args.debug:

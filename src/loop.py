@@ -26,6 +26,7 @@ from src.uncertainty import (
 from src.policy import ActionPolicy
 from src.face_registry_resolve import resolve_face_registry_dir
 from src.states import MonitorState
+from src.ui_text import draw_text_bgr
 
 # Display privacy: anonymized face box caption (LBPH identity hidden on HUD).
 PRIVACY_FACE_HUD_LABEL = "Test Object One"
@@ -51,6 +52,15 @@ class ActivePerceptionLoop:
         privacy_blur_kernel: int = 99,
         privacy_blur_pad: float = 0.10,
         privacy_blur_passes: int = 2,
+        enable_voice: bool = False,
+        voice_mode: str = "ptt",
+        voice_lang: str = "zh",
+        voice_model: str = "base",
+        voice_record_seconds: float = 5.0,
+        voice_llm: bool = True,
+        voice_llm_model: str = "qwen2.5:1.5b",
+        voice_clarify: bool = False,
+        voice_save_wav: bool = False,
     ):
         print("Initializing System Modules...")
         
@@ -148,6 +158,62 @@ class ActivePerceptionLoop:
         self.enable_exposure_control = enable_exposure_control
         self.enable_zoom_control = enable_zoom_control
         self.show_window = show_window
+
+        # Session 30: voice context flags (read by states / HUD).
+        self.enable_voice = bool(enable_voice)
+        self.voice_mode = (voice_mode or "ptt").lower().strip()
+        self.voice_status: str = "off" if not self.enable_voice else "idle"
+        self.voice_last_text: str = ""
+        self.voice_last_schema: str = ""
+        self.voice_clarify_prompt: str | None = None
+        self.voice_request_search: bool = False
+        self.voice_pt_suppress_until: float = 0.0
+        self.voice_obs = None
+        self._voice_worker = None
+        if self.enable_voice:
+            try:
+                from src.voice.metrics import VoiceObsCounters
+                from src.voice.worker import VoicePttWorker, VoiceWorkerConfig
+
+                self.voice_obs = VoiceObsCounters()
+                if self.voice_mode == "always":
+                    from src.voice.always_worker import AlwaysOnVoiceConfig, AlwaysOnVoiceWorker
+
+                    self._voice_worker = AlwaysOnVoiceWorker(
+                        self,
+                        AlwaysOnVoiceConfig(
+                            lang_hint=voice_lang if voice_lang.lower() != "auto" else None,
+                            model_size=str(voice_model),
+                            use_llm=bool(voice_llm),
+                            llm_model=str(voice_llm_model),
+                            enable_clarify=bool(voice_clarify),
+                            # keep capture max similar to PTT window by default
+                            capture_max_s=float(voice_record_seconds),
+                        ),
+                    )
+                    self._voice_worker.start()
+                    print("[i] Voice: ON (always-on wake word + VAD capture).")
+                else:
+                    self._voice_worker = VoicePttWorker(
+                        self,
+                        VoiceWorkerConfig(
+                            lang_hint=voice_lang if voice_lang.lower() != "auto" else None,
+                            record_seconds=float(voice_record_seconds),
+                            model_size=str(voice_model),
+                            use_llm=bool(voice_llm),
+                            llm_model=str(voice_llm_model),
+                            enable_clarify=bool(voice_clarify),
+                            save_wav=bool(voice_save_wav),
+                        ),
+                    )
+                    self._voice_worker.start()
+                    print("[i] Voice: ON (PTT key: 'v').")
+            except Exception as e:
+                print(f"[!] Voice init failed ({e}). Voice disabled.")
+                self.enable_voice = False
+                self.voice_status = "off"
+                self.voice_obs = None
+                self._voice_worker = None
         
         # 4. Context Variables (accessed by states)
         self.current_exposure_idx = 3
@@ -254,6 +320,8 @@ class ActivePerceptionLoop:
     def run(self, duration_s: float = None):
         print("\n=== Active Perception Loop Started ===")
         print("Press 'q' in the window to quit.")
+        if self.enable_voice:
+            print("Press 'v' in the window to speak (PTT).")
         start_time = time.time()
         
         try:
@@ -384,9 +452,18 @@ class ActivePerceptionLoop:
                 if self.show_window:
                     vis_frame = self._draw_hud(frame, smooth_u, metrics, corners, ids)
                     self.camera.display(vis_frame, "Active Perception System")
-                    
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
+
+                    k = cv2.waitKey(1) & 0xFF
+                    if k == ord("q"):
                         break
+                    if (
+                        self.enable_voice
+                        and self.voice_mode != "always"
+                        and k == ord("v")
+                        and self._voice_worker is not None
+                    ):
+                        # PTT: background voice thread will record + ASR + (optional) clarify + execute.
+                        self._voice_worker.trigger_once()
                     
         finally:
             self.blackbox.log_event(
@@ -394,6 +471,20 @@ class ActivePerceptionLoop:
                 final_state=self.current_state.name,
                 frame_idx=self.frame_count,
             )
+            obs = getattr(self, "voice_obs", None)
+            if obs is not None:
+                try:
+                    self.blackbox.log_event(
+                        "voice_metrics_session_final",
+                        metrics=obs.snapshot(),
+                    )
+                except Exception:
+                    pass
+            if self._voice_worker is not None:
+                try:
+                    self._voice_worker.stop()
+                except Exception:
+                    pass
             if self.pan_tilt is not None:
                 try:
                     self.pan_tilt.home(smooth=True)
@@ -612,7 +703,8 @@ class ActivePerceptionLoop:
             2,
         )
         y_gesture = 52
-        y_unc_text = 78
+        y_voice = 78
+        y_unc_text = 104
         if self.enable_gesture_actions:
             gtxt = self.gesture_label if self.gesture_label else "—"
             gline = f"GESTURE: {gtxt}".strip()
@@ -626,7 +718,95 @@ class ActivePerceptionLoop:
                 2,
             )
         else:
-            y_unc_text = 52
+            y_voice = 52
+            y_unc_text = 78
+
+        if self.enable_voice:
+            # Subtitle-style voice UI at bottom-left (more room for long text).
+            h, w = annotated.shape[:2]
+            vx = 12
+            font_size = 18
+            line_h = 22
+            max_chars = 48  # heuristic for font_size=18 on typical 1280px width
+
+            def _wrap(s: str, limit: int) -> list[str]:
+                s = (s or "").strip()
+                if not s:
+                    return []
+                out = []
+                cur = ""
+                for ch in s:
+                    cur += ch
+                    if len(cur) >= limit:
+                        out.append(cur)
+                        cur = ""
+                if cur:
+                    out.append(cur)
+                return out
+
+            if self.voice_clarify_prompt:
+                lines = _wrap(f"VOICE: {self.voice_clarify_prompt}", max_chars)[:3]
+                schema_line = ""
+            else:
+                if self.voice_last_text:
+                    lines = _wrap(f"VOICE({self.voice_status}): {self.voice_last_text}", max_chars)[:3]
+                elif self.voice_status in ("recording", "asr", "intent", "execute", "llm_loading", "llm_textfix_loading", "llm_bundle_loading"):
+                    # During processing, don't show stale subtitle content.
+                    lines = [f"VOICE({self.voice_status}): —"]
+                else:
+                    lines = [f"VOICE({self.voice_status}): —"]
+                if self.voice_last_schema:
+                    schema_line = f"SCHEMA: {self.voice_last_schema}"
+                else:
+                    # Keep schema line stable on-screen; placeholder while processing.
+                    schema_line = "SCHEMA: ------"
+
+            # Draw from bottom upwards.
+            y = h - 12 - (line_h * (len(lines) + (1 if schema_line else 0)))
+
+            before = annotated.copy()
+            for i, ln in enumerate(lines):
+                draw_text_bgr(
+                    annotated,
+                    ln,
+                    x=vx,
+                    y=y + i * line_h,
+                    font_size=font_size,
+                    color_bgr=(255, 220, 180),
+                )
+            if schema_line:
+                draw_text_bgr(
+                    annotated,
+                    schema_line,
+                    x=vx,
+                    y=y + len(lines) * line_h,
+                    font_size=font_size,
+                    color_bgr=(180, 220, 255),
+                )
+
+            # Fallback (ASCII-only): keep it short.
+            if np.array_equal(before, annotated):
+                fy = h - 18 - (18 * (len(lines) + (1 if schema_line else 0)))
+                for i, ln in enumerate(lines):
+                    cv2.putText(
+                        annotated,
+                        ln[:60],
+                        (vx, fy + i * 18),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        (255, 220, 180),
+                        1,
+                    )
+                if schema_line:
+                    cv2.putText(
+                        annotated,
+                        schema_line[:60],
+                        (vx, fy + len(lines) * 18),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.45,
+                        (180, 220, 255),
+                        1,
+                    )
 
         # Uncertainty bar: below Faces / ACTIVE lines from visualize() (see combined.py y)
         bar_top, bar_bot = 62, 80

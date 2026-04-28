@@ -5,6 +5,7 @@ Lightweight blackbox logger for the active perception system.
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -22,9 +23,11 @@ class BlackboxLogger:
         root_dir: str = "logs/blackbox",
         enabled: bool = True,
         frame_logging_enabled: bool = False,
+        max_sessions: int = 50,
     ):
         self.enabled = enabled
         self.frame_logging_enabled = frame_logging_enabled
+        self.max_sessions = max(1, int(max_sessions))
         self.session_dir: Optional[Path] = None
         self.frames_path: Optional[Path] = None
         self.events_path: Optional[Path] = None
@@ -34,7 +37,11 @@ class BlackboxLogger:
             return
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        self.session_dir = Path(root_dir) / ts
+        root = Path(root_dir)
+        root.mkdir(parents=True, exist_ok=True)
+        self._prune_old_sessions(root)
+
+        self.session_dir = root / ts
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self.frames_path = self.session_dir / "frames.jsonl"
         self.events_path = self.session_dir / "events.jsonl"
@@ -75,3 +82,32 @@ class BlackboxLogger:
         }
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=True) + "\n")
+
+    def _prune_old_sessions(self, root: Path) -> None:
+        """
+        Keep at most `max_sessions` timestamp-named session folders under `root`.
+        Oldest sessions are deleted first.
+        """
+        try:
+            dirs = [p for p in root.iterdir() if p.is_dir()]
+        except Exception:
+            return
+
+        # Only prune directories that match our session naming convention: YYYYMMDD_HHMMSS
+        def _is_session_dir(p: Path) -> bool:
+            name = p.name
+            if len(name) != 15:
+                return False
+            if name[8] != "_":
+                return False
+            return name[:8].isdigit() and name[9:].isdigit()
+
+        sessions = sorted([p for p in dirs if _is_session_dir(p)], key=lambda p: p.name)
+        excess = len(sessions) - int(self.max_sessions)
+        if excess <= 0:
+            return
+        for p in sessions[:excess]:
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass

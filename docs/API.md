@@ -3,6 +3,10 @@
 This document describes the **public** surface of the project — the things you would `import` in your own code, or pass on the command line. Internal helpers (`_send_pose`, `_drain_input`, etc.) are omitted on purpose; if a method is listed here, it is safe to rely on.
 
 - [Command-line interface](#command-line-interface)
+- [Voice — CLI flags (Session 30)](#voice--cli-flags-session-30)
+- [Voice / ASR (`docs/VOICE_ASR.md`)](VOICE_ASR.md)
+- [Voice intent — text → JSON (`docs/VOICE_INTENT.md`)](VOICE_INTENT.md)
+- [Voice executor — JSON → hardware](#voice-executor--json--hardware)
 - [`ActivePerceptionLoop`](#activeperceptionloop)
 - [Perception backends (`src/perception/`)](#perception-backends-srcperception)
 - [`HardwareController`](#hardwarecontroller)
@@ -67,6 +71,71 @@ Same camera / debug / pan-tilt semantics as `main.py --mode full`.
 
 ---
 
+## Voice — CLI flags (Session 30)
+
+`main.py` and `demo.py` accept the same voice-related options (PTT is the **`v`** key in the OpenCV window):
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--voice` | off | Start the background voice worker (recording → ASR → intent → executor). |
+| `--voice-mode` | `ptt` | `ptt`: press `v` to record. `always`: wake word + VAD capture (Session 31). |
+| `--voice-lang` | `zh` | ASR hint: `zh`, `en`, or `auto` (Whisper auto-detect). |
+| `--voice-model` | `base` | `faster-whisper` model size (`tiny` … `large-v3`; see `docs/VOICE_ASR.md`). |
+| `--voice-record-seconds` | `5.0` | Fixed recording window per PTT press. |
+| `--voice-save-wav` | off | Write each PTT capture under `logs/blackbox/<session>/audio/` (debug). |
+| `--voice-llm` / `--no-voice-llm` | on | Allow **local Ollama** fallback when rules-only parsing yields no actionable command (see `docs/VOICE_INTENT.md`). |
+| `--voice-llm-model` | `qwen2.5:1.5b` | Ollama model tag. |
+| `--voice-clarify` / `--no-voice-clarify` | off | One-round clarification: first unclear transcript → HUD prompt only (no LLM, no servo); second PTT may merge into one LLM call if enabled. |
+
+**ASR in the live loop:** the PTT worker always constructs `FasterWhisperAsrProvider`. `MockAsrProvider` is for **`python -m src.voice.asr_demo --backend mock`** and unit tests (`tests/test_voice_asr_provider.py`), not wired to `main.py` by default.
+
+### Priority vs vision PT, gestures, and privacy
+
+| Writer | When it runs | Interaction |
+| --- | --- | --- |
+| **Voice executor** | After validated JSON, on PTT completion | Sets `voice_pt_suppress_until` on the loop; **visual face-tracking PT** (`pan_tilt.nudge` in `MonitorState`) **skips writes** while `time.time() < voice_pt_suppress_until`. |
+| **Gesture actions** | When enabled (`--gesture-actions`, default on) | Same suppression flag applies where implemented in `states.py` (do not fight voice moves). |
+| **`--privacy` / blur** | Display / zoom policy only | Does **not** disable voice; ASR still runs **locally**. Blur affects on-screen face ROIs, not the microphone path. |
+
+### Blackbox events (voice)
+
+With **`--debug`**, per-frame `frames.jsonl` is heavy; **voice events always append to `events.jsonl`** whenever blackbox is enabled (normal runs create a session folder).
+
+| `event_type` | Role |
+| --- | --- |
+| `voice_ptt_triggered` | User pressed `v`; includes `awaiting_clarification`, model, LLM/clarify flags. |
+| `voice_audio_recorded` | RMS / peak / optional `wav_path`. |
+| `voice_asr_done` | `t_asr_ms`, `language`, `duration_audio_s`, transcript. |
+| `voice_text_normalized` | Chinese offline normalization applied (`before` / `after`). |
+| `voice_llm_plan` | Whether LLM is **planned** on this turn (first-turn heuristic). |
+| `voice_llm_*_attempted` / `voice_llm_*_result` | Bundle / text-fix / legacy `propose_command` timing and raw payload (wrapper in `worker.py`). |
+| `voice_clarify_prompt` | Clarification-only turn (no execution). |
+| `voice_intent_resolved` | Final `parser` (`rule` / `llm` / `none`) + `commands`. |
+| `voice_intent_schema_reject` | LLM was used but output did not validate (`note == llm_failed`). |
+| `voice_command_*` | `execute_voice_command`: `voice_command_execute`, `voice_command_noop`, `voice_command_search`, `voice_command_skipped_no_pantilt`, `voice_command_rejected`, `voice_command_failed`. |
+| `voice_execute_done` | Batch finished (`n_commands`). |
+| `voice_ptt_cycle_end` | **Cumulative counters** snapshot for this PTT (`outcome`, `metrics` dict). |
+| `voice_metrics_session_final` | Same counters at **session shutdown** (if `--voice` was on). |
+
+Counter keys are sparse integers (e.g. `voice_asr_done`, `voice_intent_parser_rule`, `voice_llm_bundle_attempts`, `voice_exec_hardware`, `voice_clarify_prompts`). See `src/voice/metrics.py` and `src/voice/worker.py` for the authoritative list.
+
+---
+
+## Voice executor — JSON → hardware
+
+Module: `src/voice/executor.py`
+
+Consumes **validated** Command JSON (from `src/voice_intent/schema.py`) and:
+
+- Calls `HardwareController` (pan-tilt) when present.
+- Or sets `voice_request_search` on the loop context to trigger an FSM transition.
+- If `pan_tilt is None`, it must **not crash** and must not touch serial.
+
+Public functions:
+
+- `execute_voice_command(cmd, context, *, pt_suppress_s=0.6, smooth=True) -> VoiceExecutionReport`
+- `execute_voice_commands(commands, context, *, pt_suppress_s=0.6, smooth=True) -> list[VoiceExecutionReport]`
+
 ## `ActivePerceptionLoop`
 
 Module: `src/loop.py`
@@ -104,6 +173,15 @@ app.run()
 | `face_registry_dir`       | `str \| None` | `None` | For `face` / `mixed` / `auto`, `None`/empty → `<repo>/face_registry` (see `src/face_registry_resolve.py`). |
 | `face_match_threshold`    | `float` | `85.0` | LBPH distance threshold (lower is better).                                                |
 | `primary_hysteresis_frames` | `int` | `0`   | Passed to `FaceDetector` in face mode (see CLI flag). Ignored for ArUco.                 |
+| `enable_voice` | `bool` | `False` | Start the voice worker and allocate `voice_obs` counters. |
+| `voice_mode` | `str` | `\"ptt\"` | `ptt` (Session 30) or `always` (Session 31 wake word + VAD). |
+| `voice_lang` | `str` | `"zh"` | ASR language hint (`auto` → `None` for Whisper). |
+| `voice_model` | `str` | `"base"` | Whisper model size. |
+| `voice_record_seconds` | `float` | `5.0` | PTT window. |
+| `voice_llm` | `bool` | `True` | Enable Ollama fallback path. |
+| `voice_llm_model` | `str` | `"qwen2.5:1.5b"` | Ollama model name. |
+| `voice_clarify` | `bool` | `True` | One-round clarification (see voice CLI above). |
+| `voice_save_wav` | `bool` | `False` | Save PTT WAV under the blackbox session folder. |
 
 If `enable_pan_tilt=True` but the port cannot be opened, the loop prints a warning and continues in digital-only mode — it never raises.
 

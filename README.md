@@ -154,6 +154,23 @@ python main.py --mode benchmark --duration 30
 
 Press `q` in the video window to exit; the stage will auto-home on shutdown.
 
+### Voice control (optional, Session 30)
+
+Offline **push-to-talk** voice runs in-process: microphone → ASR → rules (optional local **Ollama** JSON fallback) → validated commands → pan-tilt / search flag. In the video window, press **`v`** to record one utterance (see `--voice-record-seconds`).
+
+```powershell
+python main.py --voice --debug --no-pan-tilt
+python main.py --voice --voice-llm --voice-llm-model qwen2.5:1.5b
+```
+
+Full CLI flags, blackbox `event_type` names, and interaction with visual tracking / gestures are in **[`docs/API.md`](docs/API.md)** (voice section). ASR and intent behavior: [`docs/VOICE_ASR.md`](docs/VOICE_ASR.md), [`docs/VOICE_INTENT.md`](docs/VOICE_INTENT.md).
+
+### Limitations and safety
+
+- **ASR** may transcribe incorrectly; an optional **local LLM** may still output `noop` or a wrong but schema-valid command. The executor only runs **whitelist** JSON and hardware limits still apply—treat voice as **assistive**, not safety-critical.
+- **Physical stop:** remove servo power or unplug the Arduino USB cable; software cannot guarantee instant mechanical stop.
+- Session design notes and acceptance ideas: [`Implementation_plan.md`](Implementation_plan.md) (Week 7 — Session 30).
+
 ---
 
 ## Software Architecture
@@ -183,6 +200,7 @@ active-perception-camera-system/
 │   ├── controller.py           # HardwareController (pan-tilt over serial)
 │   ├── states.py               # Finite state machine (Monitor / Explore / Sniper / Search)
 │   ├── loop.py                 # ActivePerceptionLoop — main orchestrator
+│   ├── voice/                  # Session 30: ASR → intent → executor (PTT)
 │   ├── logger.py               # Blackbox event + screenshot logging
 │   ├── benchmark.py            # Baseline vs active comparisons
 │   └── __init__.py
@@ -196,7 +214,9 @@ active-perception-camera-system/
 │           └── pan_tilt_serial.ino   # Servo firmware (PAN/TILT over serial)
 │
 ├── docs/
-│   └── API.md                  # CLI, HardwareController, ActivePerceptionLoop, serial protocol
+│   ├── API.md                  # CLI, voice blackbox, HardwareController, loop, serial protocol
+│   ├── VOICE_ASR.md            # faster-whisper / mock ASR
+│   └── VOICE_INTENT.md         # rules + optional Ollama bundle
 │
 ├── scripts/
 │   └── make_gif.py             # Blink GIF / side-by-side from HUD screenshots (social posts)

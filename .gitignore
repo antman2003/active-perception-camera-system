@@ -23,3 +23,10 @@ face_registry/**/*.jpeg
 face_registry/**/*.png
 face_registry/**/*.bmp
 face_registry/**/*.webp
+
+
+voice_registry/**/*.wav
+voice_registry/**/*.mp3
+voice_registry/**/*.m4a
+
+
