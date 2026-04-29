@@ -28,6 +28,9 @@ from src.voice.llm_client import (
 from src.voice.intent import _intent_from_rules, _intent_has_non_noop, normalize_zh_command_text
 from src.voice.metrics import record_voice_obs
 
+_SCHEMA_HOLD_UNSET = object()
+_SCHEMA_HOLD_AFTER_EXECUTE_S = 8.0
+
 
 @dataclass
 class VoiceWorkerConfig:
@@ -199,25 +202,44 @@ class VoicePttWorker:
 
     def _set_status(self, status: str) -> None:
         try:
-            setattr(self._context, "voice_status", status)
+            fn = getattr(self._context, "set_voice_ui", None)
+            if callable(fn):
+                fn(status=status)
+            else:
+                setattr(self._context, "voice_status", status)
         except Exception:
             pass
 
     def _set_last_text(self, text: str) -> None:
         try:
-            setattr(self._context, "voice_last_text", text)
+            fn = getattr(self._context, "set_voice_ui", None)
+            if callable(fn):
+                fn(last_text=text)
+            else:
+                setattr(self._context, "voice_last_text", text)
         except Exception:
             pass
 
-    def _set_last_schema(self, schema_line: str) -> None:
+    def _set_last_schema(self, schema_line: str, *, schema_hold_s: Any = _SCHEMA_HOLD_UNSET) -> None:
         try:
-            setattr(self._context, "voice_last_schema", schema_line)
+            fn = getattr(self._context, "set_voice_ui", None)
+            if callable(fn):
+                if schema_hold_s is _SCHEMA_HOLD_UNSET:
+                    fn(last_schema=schema_line)
+                else:
+                    fn(last_schema=schema_line, schema_hold_s=schema_hold_s)
+            else:
+                setattr(self._context, "voice_last_schema", schema_line)
         except Exception:
             pass
 
     def _set_prompt(self, prompt: str | None) -> None:
         try:
-            setattr(self._context, "voice_clarify_prompt", prompt)
+            fn = getattr(self._context, "set_voice_ui", None)
+            if callable(fn):
+                fn(clarify_prompt=prompt)
+            else:
+                setattr(self._context, "voice_clarify_prompt", prompt)
         except Exception:
             pass
 
@@ -422,7 +444,8 @@ class VoicePttWorker:
                         schema_line += f" …(+{len(non_noop) - 3})"
                 else:
                     schema_line = "无法解析"
-                self._set_last_schema(schema_line)
+                # Keep SCHEMA visible briefly; main thread will auto-revert to `SCHEMA: ------`.
+                self._set_last_schema(schema_line, schema_hold_s=_SCHEMA_HOLD_AFTER_EXECUTE_S)
                 self._log(
                     "voice_intent_resolved",
                     parser=cr.parser,

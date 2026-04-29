@@ -81,7 +81,8 @@ Same camera / debug / pan-tilt semantics as `main.py --mode full`.
 | `--voice-mode` | `ptt` | `ptt`: press `v` to record. `always`: wake word + VAD capture (Session 31). |
 | `--voice-lang` | `zh` | ASR hint: `zh`, `en`, or `auto` (Whisper auto-detect). |
 | `--voice-model` | `base` | `faster-whisper` model size (`tiny` … `large-v3`; see `docs/VOICE_ASR.md`). |
-| `--voice-record-seconds` | `5.0` | Fixed recording window per PTT press. |
+| `--voice-record-seconds` | `8.0` | Fixed recording window per PTT press. |
+| `--voice-capture-silence-hangover-ms` | `2000` | Always-on: end an utterance after this much post-speech silence. |
 | `--voice-save-wav` | off | Write each PTT capture under `logs/blackbox/<session>/audio/` (debug). |
 | `--voice-llm` / `--no-voice-llm` | on | Allow **local Ollama** fallback when rules-only parsing yields no actionable command (see `docs/VOICE_INTENT.md`). |
 | `--voice-llm-model` | `qwen2.5:1.5b` | Ollama model tag. |
@@ -116,6 +117,16 @@ With **`--debug`**, per-frame `frames.jsonl` is heavy; **voice events always app
 | `voice_execute_done` | Batch finished (`n_commands`). |
 | `voice_ptt_cycle_end` | **Cumulative counters** snapshot for this PTT (`outcome`, `metrics` dict). |
 | `voice_metrics_session_final` | Same counters at **session shutdown** (if `--voice` was on). |
+
+**Always-on (`--voice --voice-mode always`)** — same Session 30 events after ASR (`voice_asr_done`, …), plus wake / segment timeline:
+
+| `event_type` | Role |
+| --- | --- |
+| `wake_listening_started` | Mic stream up; chunk size and wake thresholds. |
+| `wake_detected` | Wake confirmed (legacy name; same payload as below). |
+| `voice_wake_detected` | Same as `wake_detected` — use this for stable `voice_*` grep in `events.jsonl`. |
+| `wake_capture_end` | VAD window closed (`duration_s`, `n_chunks`, `end_reason`: `silence` \| `max_len`). |
+| `voice_segment_captured` | Utterance PCM ready for ASR: `samples`, `duration_ms`, `truncated` (hit `max_len` before silence hangover), `end_reason`, `n_chunks`. **No raw PCM** in the log. |
 
 Counter keys are sparse integers (e.g. `voice_asr_done`, `voice_intent_parser_rule`, `voice_llm_bundle_attempts`, `voice_exec_hardware`, `voice_clarify_prompts`). See `src/voice/metrics.py` and `src/voice/worker.py` for the authoritative list.
 

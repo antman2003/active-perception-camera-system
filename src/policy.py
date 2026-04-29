@@ -190,10 +190,10 @@ class ActionPolicy:
         # 4. Check if it changed
         # Note: Some cameras return approximate values, so we check range
         if new_val != initial_val:
-            print(">> Exposure Control: SUPPORTED ✅")
+            print(">> Exposure Control: SUPPORTED [OK]")
             return True
         else:
-            print(">> Exposure Control: NOT SUPPORTED ❌ (or failed to change)")
+            print(">> Exposure Control: NOT SUPPORTED [X] (or failed to change)")
             return False
 
     def execute_exposure(self, level_idx: int):

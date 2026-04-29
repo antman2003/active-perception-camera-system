@@ -122,6 +122,15 @@ Full assembly, wiring, firmware flashing and calibration instructions: **[`hardw
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
+```
+
+### Optional: voice dependencies (Session 30 / 31)
+
+Install these if you want offline voice (PTT) or always-on wake word:
+
+```powershell
+pip install -r requirements-voice.txt
 ```
 
 ### 2. Flash the Arduino (optional — only if using the pan-tilt)

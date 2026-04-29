@@ -87,7 +87,7 @@ def parse_args(argv=None):
         "--face-registry",
         type=str,
         default=None,
-        help="Enrolled faces root. Omitted in face|mixed|auto → repo ./face_registry (must exist).",
+        help="Enrolled faces root. Omitted in face|mixed|auto -> repo ./face_registry (must exist).",
     )
     parser.add_argument(
         "--face-threshold",
@@ -132,6 +132,49 @@ def parse_args(argv=None):
         help="Voice mode: ptt (press 'v') or always (wake word + VAD capture). Default: ptt.",
     )
     parser.add_argument(
+        "--voice-wake-backend",
+        type=str,
+        default="openwakeword",
+        choices=("openwakeword", "mock"),
+        help="Wake backend for --voice-mode always. Default: openwakeword.",
+    )
+    parser.add_argument(
+        "--voice-wake-models",
+        type=str,
+        default=None,
+        help="Comma-separated wake model paths for openwakeword (optional). Default: use built-in models.",
+    )
+    parser.add_argument(
+        "--voice-wake-threshold",
+        type=float,
+        default=0.5,
+        help="Wake threshold for openwakeword (default: 0.5).",
+    )
+    parser.add_argument(
+        "--voice-wake-confirm-chunks",
+        type=int,
+        default=3,
+        help="Require N consecutive chunks to confirm wake (default: 3).",
+    )
+    parser.add_argument(
+        "--voice-wake-refractory-ms",
+        type=int,
+        default=1200,
+        help="Cooldown after ASR/execute before scanning wake again (default: 1200ms).",
+    )
+    parser.add_argument(
+        "--voice-wake-mock-every-chunks",
+        type=int,
+        default=50,
+        help="Mock backend: trigger a wake every N chunks (default: 50).",
+    )
+    parser.add_argument(
+        "--voice-capture-silence-hangover-ms",
+        type=int,
+        default=2000,
+        help="Always-on capture: end utterance after this much post-speech silence (default: 2000ms).",
+    )
+    parser.add_argument(
         "--voice-lang",
         type=str,
         default="zh",
@@ -146,8 +189,8 @@ def parse_args(argv=None):
     parser.add_argument(
         "--voice-record-seconds",
         type=float,
-        default=5.0,
-        help="PTT recording window seconds per 'v' press (default: 5.0).",
+        default=8.0,
+        help="PTT recording window seconds per 'v' press (default: 8.0).",
     )
     parser.add_argument(
         "--voice-save-wav",
@@ -250,6 +293,13 @@ def main(argv=None):
                 privacy_blur_passes=args.privacy_blur_passes,
                 enable_voice=args.voice,
                 voice_mode=args.voice_mode,
+                voice_wake_backend=args.voice_wake_backend,
+                voice_wake_models=args.voice_wake_models,
+                voice_wake_threshold=args.voice_wake_threshold,
+                voice_wake_confirm_chunks=args.voice_wake_confirm_chunks,
+                voice_wake_refractory_ms=args.voice_wake_refractory_ms,
+                voice_wake_mock_every_chunks=args.voice_wake_mock_every_chunks,
+                voice_capture_silence_hangover_ms=args.voice_capture_silence_hangover_ms,
                 voice_lang=args.voice_lang,
                 voice_model=args.voice_model,
                 voice_record_seconds=args.voice_record_seconds,
