@@ -163,22 +163,29 @@ python main.py --mode benchmark --duration 30
 
 Press `q` in the video window to exit; the stage will auto-home on shutdown.
 
-### Voice control (optional, Session 30)
+### Voice control (optional, Session 30 & 31)
 
-Offline **push-to-talk** voice runs in-process: microphone → ASR → rules (optional local **Ollama** JSON fallback) → validated commands → pan-tilt / search flag. In the video window, press **`v`** to record one utterance (see `--voice-record-seconds`).
+Offline voice runs **in-process** on the PC: microphone → ASR → rules (optional local **Ollama** JSON fallback) → validated commands → pan-tilt / search flag. **Session 30 — push-to-talk:** in the video window, press **`v`** to record one utterance (see `--voice-record-seconds`). **Session 31 — always-on:** say the configured wake phrase (English built-in models with openWakeWord) or use **`--voice-wake-backend mock`** for testing without a wake model; the HUD shows a **`WAKE:`** line plus **`VOICE` / `SCHEMA`** subtitles.
 
 ```powershell
+pip install -r requirements-voice.txt
+
+# PTT (no wake model required)
 python main.py --voice --debug --no-pan-tilt
 python main.py --voice --voice-llm --voice-llm-model qwen2.5:1.5b
+
+# Always-on: mock wake (good for headless / CI-style smoke checks)
+python main.py --voice --voice-mode always --voice-wake-backend mock --debug --no-pan-tilt
 ```
 
-Full CLI flags, blackbox `event_type` names, and interaction with visual tracking / gestures are in **[`docs/API.md`](docs/API.md)** (voice section). ASR and intent behavior: [`docs/VOICE_ASR.md`](docs/VOICE_ASR.md), [`docs/VOICE_INTENT.md`](docs/VOICE_INTENT.md).
+Full CLI flags, **HUD layout**, blackbox **`event_type`** names, **triage order**, and interaction with visual tracking / gestures are in **[`docs/API.md`](docs/API.md)** (voice section). ASR and intent behavior: [`docs/VOICE_ASR.md`](docs/VOICE_ASR.md), [`docs/VOICE_INTENT.md`](docs/VOICE_INTENT.md).
 
 ### Limitations and safety
 
 - **ASR** may transcribe incorrectly; an optional **local LLM** may still output `noop` or a wrong but schema-valid command. The executor only runs **whitelist** JSON and hardware limits still apply—treat voice as **assistive**, not safety-critical.
+- **Always-on microphone:** audio is processed **locally**; default logging is **text + JSON + metrics**, not raw microphone dumps (optional PTT WAV with `--voice-save-wav`). You are responsible for **consent and environment** when demoing in public spaces.
 - **Physical stop:** remove servo power or unplug the Arduino USB cable; software cannot guarantee instant mechanical stop.
-- Session design notes and acceptance ideas: [`Implementation_plan.md`](Implementation_plan.md) (Week 7 — Session 30).
+- Session design notes, **Session 30 / 31 step 7 (documentation DoD)**, and acceptance tables: [`Implementation_plan.md`](Implementation_plan.md) (Week 7 — Session 30 & Session 31).
 
 ---
 

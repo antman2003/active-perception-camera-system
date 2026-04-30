@@ -1018,9 +1018,54 @@ class ActivePerceptionLoop:
             color,
             2,
         )
-        y_gesture = 52
-        y_voice = 78
-        y_unc_text = 104
+        # Session 31 step 7: explicit WAKE line for always-on demos (timeline: wake vs ASR).
+        show_wake_hud = self.enable_voice and getattr(self, "voice_mode", "ptt") == "always"
+        y_wake = 0
+        if show_wake_hud:
+            vs0, _, _, _, _, _ = self.get_voice_ui_snapshot()
+
+            def _wake_hud_label(st: str) -> str:
+                st = (st or "").strip()
+                if st == "wake_listening":
+                    return "listening"
+                if st == "wake_cooldown":
+                    return "cooldown"
+                if st == "wake_capturing":
+                    return "capturing"
+                if st == "wake_starting":
+                    return "starting"
+                if st.startswith("wake_"):
+                    return st.replace("wake_", "", 1) or st
+                if st.startswith("asr") or st.startswith("llm_") or st in (
+                    "asr",
+                    "intent",
+                    "execute",
+                    "clarify_wait",
+                    "no_speech",
+                    "noop",
+                    "recording",
+                ):
+                    return "processing"
+                if st.startswith("wake_worker_crashed") or st in ("init_failed", "off"):
+                    return "error" if st != "off" else "off"
+                return st or "off"
+
+            y_wake = y_mode + 22
+            cv2.putText(
+                annotated,
+                f"WAKE: {_wake_hud_label(vs0)}",
+                (rx, y_wake),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                (200, 220, 255),
+                2,
+            )
+
+        row_after_mode = y_wake if show_wake_hud else y_mode
+        base_gap = 24
+        y_gesture = int(row_after_mode + base_gap)
+        y_voice = int(y_gesture + 26)
+        y_unc_text = int(y_voice + 26)
         if self.enable_gesture_actions:
             gtxt = self.gesture_label if self.gesture_label else "—"
             gline = f"GESTURE: {gtxt}".strip()
@@ -1034,8 +1079,8 @@ class ActivePerceptionLoop:
                 2,
             )
         else:
-            y_voice = 52
-            y_unc_text = 78
+            y_voice = int(row_after_mode + base_gap)
+            y_unc_text = int(y_voice + 26)
 
         if self.enable_voice:
             self._maybe_expire_voice_schema_hud()

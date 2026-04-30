@@ -3,7 +3,7 @@
 This document describes the **public** surface of the project — the things you would `import` in your own code, or pass on the command line. Internal helpers (`_send_pose`, `_drain_input`, etc.) are omitted on purpose; if a method is listed here, it is safe to rely on.
 
 - [Command-line interface](#command-line-interface)
-- [Voice — CLI flags (Session 30)](#voice--cli-flags-session-30)
+- [Voice — CLI flags (Session 30 & 31)](#voice--cli-flags-session-30--31)
 - [Voice / ASR (`docs/VOICE_ASR.md`)](VOICE_ASR.md)
 - [Voice intent — text → JSON (`docs/VOICE_INTENT.md`)](VOICE_INTENT.md)
 - [Voice executor — JSON → hardware](#voice-executor--json--hardware)
@@ -71,24 +71,55 @@ Same camera / debug / pan-tilt semantics as `main.py --mode full`.
 
 ---
 
-## Voice — CLI flags (Session 30)
+## Voice — CLI flags (Session 30 & 31)
 
-`main.py` and `demo.py` accept the same voice-related options (PTT is the **`v`** key in the OpenCV window):
+`main.py` and `demo.py` accept the same voice-related options (PTT is the **`v`** key in the OpenCV window). **Always-on** is enabled with `--voice --voice-mode always` (no separate `--voice-wake` flag).
+
+### Core (PTT + ASR + intent)
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--voice` | off | Start the background voice worker (recording → ASR → intent → executor). |
-| `--voice-mode` | `ptt` | `ptt`: press `v` to record. `always`: wake word + VAD capture (Session 31). |
+| `--voice-mode` | `ptt` | `ptt`: press `v` to record. `always`: wake word + VAD capture, then same ASR → intent → executor stack (Session 31). |
 | `--voice-lang` | `zh` | ASR hint: `zh`, `en`, or `auto` (Whisper auto-detect). |
 | `--voice-model` | `base` | `faster-whisper` model size (`tiny` … `large-v3`; see `docs/VOICE_ASR.md`). |
-| `--voice-record-seconds` | `8.0` | Fixed recording window per PTT press. |
-| `--voice-capture-silence-hangover-ms` | `2000` | Always-on: end an utterance after this much post-speech silence. |
-| `--voice-save-wav` | off | Write each PTT capture under `logs/blackbox/<session>/audio/` (debug). |
+| `--voice-record-seconds` | `8.0` | PTT: max recording window per `v` press. Always-on: upper cap for one utterance (with VAD end). |
+| `--voice-capture-silence-hangover-ms` | `2000` | Always-on: after speech has started, end capture after this many ms of sub-threshold RMS (post-speech silence). |
+| `--voice-save-wav` | off | PTT only: write each capture under `logs/blackbox/<session>/audio/` (debug). |
 | `--voice-llm` / `--no-voice-llm` | on | Allow **local Ollama** fallback when rules-only parsing yields no actionable command (see `docs/VOICE_INTENT.md`). |
 | `--voice-llm-model` | `qwen2.5:1.5b` | Ollama model tag. |
 | `--voice-clarify` / `--no-voice-clarify` | off | One-round clarification: first unclear transcript → HUD prompt only (no LLM, no servo); second PTT may merge into one LLM call if enabled. |
 
-**ASR in the live loop:** the PTT worker always constructs `FasterWhisperAsrProvider`. `MockAsrProvider` is for **`python -m src.voice.asr_demo --backend mock`** and unit tests (`tests/test_voice_asr_provider.py`), not wired to `main.py` by default.
+### Always-on only (`--voice-mode always`)
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--voice-wake-backend` | `openwakeword` | `openwakeword` \| `mock`. Use `mock` for CI / demos without a mic model. |
+| `--voice-wake-models` | (built-ins) | Optional comma-separated model names for openWakeWord (see upstream docs). |
+| `--voice-wake-threshold` | `0.5` | Score threshold for wake confirmation. |
+| `--voice-wake-confirm-chunks` | `3` | Require this many consecutive scoring chunks before declaring wake. |
+| `--voice-wake-refractory-ms` | `1200` | Cooldown after a cycle before wake scanning resumes. |
+| `--voice-wake-mock-every-chunks` | `50` | Mock backend: trigger wake every *N* audio chunks. |
+
+**ASR in the live loop:** both PTT and always-on workers construct `FasterWhisperAsrProvider`. `MockAsrProvider` is for **`python -m src.voice.asr_demo --backend mock`** and unit tests (`tests/test_voice_asr_provider.py`), not wired to `main.py` by default.
+
+### HUD (Session 31 step 7)
+
+| Mode | What you see |
+| --- | --- |
+| `ptt` | Bottom-left **VOICE(...)** subtitle + **SCHEMA** line; press `v` to talk. |
+| `always` | Top-right **WAKE:** line (`listening` / `capturing` / `cooldown` / `processing` / `error`) plus the same **VOICE** / **SCHEMA** area for transcript and command summary. |
+
+### Blackbox triage order (`events.jsonl`)
+
+Use **`--debug`** so each run gets `logs/blackbox/<timestamp>/events.jsonl`. For a single utterance, read top → bottom:
+
+1. **Always-on:** `wake_listening_started` → `voice_wake_detected` (or `wake_detected`) → `voice_segment_captured` → `wake_capture_end`.
+2. **ASR:** `voice_asr_done` (or `voice_asr_error` / `voice_asr_empty`).
+3. **Intent:** `voice_intent_resolved`, optional `voice_clarify_prompt`, LLM rows `voice_llm_*`.
+4. **Act:** `voice_command_*`, `voice_execute_done`, then `voice_ptt_cycle_end` (PTT) or return to wake cooldown (always-on).
+
+This matches **Session 30 / 31 — step 7** in `Implementation_plan.md` (documentation + observability DoD).
 
 ### Priority vs vision PT, gestures, and privacy
 
@@ -128,7 +159,27 @@ With **`--debug`**, per-frame `frames.jsonl` is heavy; **voice events always app
 | `wake_capture_end` | VAD window closed (`duration_s`, `n_chunks`, `end_reason`: `silence` \| `max_len`). |
 | `voice_segment_captured` | Utterance PCM ready for ASR: `samples`, `duration_ms`, `truncated` (hit `max_len` before silence hangover), `end_reason`, `n_chunks`. **No raw PCM** in the log. |
 
+Other useful always-on events (non-exhaustive): `wake_worker_start_called`, `wake_audio_status` (PortAudio quirks), `wake_worker_crashed`, `voice_asr_error`. HUD diagnostics: `hud_voice_draw_failed`, `hud_schema_draw_failed`, `hud_loop_stall` (if the main loop stalls while voice is in a heavy state).
+
 Counter keys are sparse integers (e.g. `voice_asr_done`, `voice_intent_parser_rule`, `voice_llm_bundle_attempts`, `voice_exec_hardware`, `voice_clarify_prompts`). See `src/voice/metrics.py` and `src/voice/worker.py` for the authoritative list.
+
+### Voice troubleshooting (Windows)
+
+| Symptom | Things to check |
+| --- | --- |
+| No microphone / `sounddevice` errors | Close other apps using the mic; try a different default recording device in Windows settings. |
+| openWakeWord / ONNX fails to load | Ensure `pip install -r requirements-voice.txt`; on some Windows setups, install/update **VC++ redistributable** or try a different `onnxruntime` wheel from PyPI. |
+| Wake never fires | Lower `--voice-wake-threshold` slightly; increase `--voice-wake-confirm-chunks` if you get false triggers; use `--voice-wake-backend mock` to verify the rest of the pipeline. |
+| Capture ends too soon / too late | Tune `--voice-capture-silence-hangover-ms` and/or `--voice-record-seconds` (max utterance cap). |
+| Ollama never used | Rules may already return a command; or run with explicit `--voice-llm` and ensure `ollama serve` is up (`docs/VOICE_INTENT.md`). |
+
+**Recommended tuning order (always-on wake + VAD):**
+
+1. **Wake sensitivity**: tune `--voice-wake-threshold` first (then `--voice-wake-confirm-chunks` for false triggers).
+2. **Endpointing**: tune `--voice-capture-silence-hangover-ms` so short commands end quickly but natural pauses don’t cut you off.
+3. **Max utterance cap**: tune `--voice-record-seconds` to bound tail latency / worst-case CPU.
+
+**Note on wake phrases:** openWakeWord built-in models are typically **English phrases**. For Session 31 v1, use **English wake + Chinese/English command**; a custom Chinese wake model is a separate milestone.
 
 ---
 
@@ -188,10 +239,10 @@ app.run()
 | `voice_mode` | `str` | `\"ptt\"` | `ptt` (Session 30) or `always` (Session 31 wake word + VAD). |
 | `voice_lang` | `str` | `"zh"` | ASR language hint (`auto` → `None` for Whisper). |
 | `voice_model` | `str` | `"base"` | Whisper model size. |
-| `voice_record_seconds` | `float` | `5.0` | PTT window. |
+| `voice_record_seconds` | `float` | `8.0` | PTT window seconds; also always-on max utterance cap (see CLI). |
 | `voice_llm` | `bool` | `True` | Enable Ollama fallback path. |
 | `voice_llm_model` | `str` | `"qwen2.5:1.5b"` | Ollama model name. |
-| `voice_clarify` | `bool` | `True` | One-round clarification (see voice CLI above). |
+| `voice_clarify` | `bool` | `False` | One-round clarification (see voice CLI above; default matches `main.py`). |
 | `voice_save_wav` | `bool` | `False` | Save PTT WAV under the blackbox session folder. |
 
 If `enable_pan_tilt=True` but the port cannot be opened, the loop prints a warning and continues in digital-only mode — it never raises.
